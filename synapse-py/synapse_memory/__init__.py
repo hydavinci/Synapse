@@ -1,11 +1,20 @@
-"""Synapse Memory Protocol SDK — Python client for distributed AI agent memory.
+"""Synapse Memory — Persistent memory for AI agents.
 
-Example usage:
-    >>> from synapse_memory import SynapseClient, MemoryKind, Scope
-    >>> async with SynapseClient("localhost:9090") as client:
-    ...     record = await client.add("User prefers concise answers", kind=MemoryKind.PREFERENCE)
-    ...     results = await client.search("user preferences")
-    ...     context = client.to_context(results)
+Two ways to use:
+
+1. As MCP server (recommended for most users):
+   $ synapse-mcp
+
+2. As Python library:
+   >>> from synapse_memory import LocalStore, MemoryKind, Scope
+   >>> store = LocalStore()
+   >>> store.add("User prefers concise answers", kind=MemoryKind.PREFERENCE)
+   >>> results = store.search("user preferences")
+
+3. As distributed client (connects to Synapse server):
+   >>> from synapse_memory import SynapseClient
+   >>> async with SynapseClient("localhost:9090") as client:
+   ...     await client.add("User prefers concise answers")
 """
 
 from .client import (
@@ -15,6 +24,7 @@ from .client import (
     SynapseClient,
     SynapseError,
 )
+from .local_store import LocalStore
 from .models import (
     Conflict,
     ConflictPolicy,
@@ -36,7 +46,9 @@ from .scope import ScopeParseError, is_visible, parse_scope, serialize_scope
 from .utils import to_context
 
 __all__ = [
-    # Client
+    # Local store (zero-config)
+    "LocalStore",
+    # Remote client (distributed)
     "SynapseClient",
     "SynapseError",
     "ConnectionError",

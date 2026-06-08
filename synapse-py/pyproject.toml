@@ -5,47 +5,65 @@ build-backend = "hatchling.build"
 [project]
 name = "synapse-memory"
 version = "0.1.0"
-description = "Python SDK for the Synapse distributed memory protocol for AI agents"
+description = "Persistent memory for AI agents — local or distributed. Works as MCP server with any AI client."
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [
     { name = "Synapse Contributors" },
 ]
-keywords = ["ai", "agents", "memory", "distributed", "protocol", "mcp"]
+keywords = ["ai", "agents", "memory", "mcp", "llm", "distributed", "protocol", "rag"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+
 dependencies = [
     "pydantic>=2.0",
-    "grpcio>=1.60.0",
-    "grpcio-tools>=1.60.0",
     "httpx>=0.25.0",
     "mcp>=1.0.0",
-    "protobuf>=4.25.0",
+    "numpy>=1.24.0",
 ]
 
 [project.optional-dependencies]
+# Local embeddings (no API key needed, ~80MB model download)
+local = [
+    "sentence-transformers>=2.2.0",
+    "torch>=2.0.0",
+]
+# Remote/distributed mode (connects to Synapse gRPC server)
+remote = [
+    "grpcio>=1.60.0",
+    "grpcio-tools>=1.60.0",
+    "protobuf>=4.25.0",
+]
+# All features
+all = [
+    "synapse-memory[local,remote]",
+]
+# Development
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.23.0",
     "respx>=0.21.0",
+    "mypy>=1.0",
 ]
 
 [project.scripts]
 synapse-mcp = "synapse_memory.mcp_server:main"
 
 [project.urls]
-Homepage = "https://github.com/synapse-protocol/synapse"
-Documentation = "https://synapse-protocol.github.io/docs"
-Repository = "https://github.com/synapse-protocol/synapse"
+Homepage = "https://github.com/hydavinci/Synapse"
+Documentation = "https://github.com/hydavinci/Synapse/blob/main/docs/getting-started.md"
+Repository = "https://github.com/hydavinci/Synapse"
+Issues = "https://github.com/hydavinci/Synapse/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["synapse_memory"]

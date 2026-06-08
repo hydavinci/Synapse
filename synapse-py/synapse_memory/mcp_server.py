@@ -6,7 +6,16 @@ Exposes memory operations as MCP tools:
 - memory_forget: Remove a specific memory
 - memory_update: Update an existing memory
 
-Run as: python -m synapse_memory.mcp_server --endpoint localhost:9090
+Two modes:
+- Local (default): Uses embedded SQLite storage. Zero external dependencies.
+  Just `synapse-mcp` and it works.
+- Remote: Connects to a Synapse gRPC/REST server for distributed operation.
+  Use `synapse-mcp --endpoint host:port`
+
+Run as:
+  synapse-mcp                              # Local mode (default)
+  synapse-mcp --endpoint localhost:9090    # Remote mode
+  synapse-mcp --db ~/.synapse/my.db        # Custom local DB path
 """
 
 from __future__ import annotations
@@ -15,14 +24,14 @@ import argparse
 import asyncio
 import logging
 import sys
+from pathlib import Path
 from typing import Any, Optional
 
 from mcp.server import Server
 from mcp.server.stdio import run_server
 from mcp.types import TextContent, Tool
 
-from .client import SynapseClient
-from .models import MemoryKind, Scope, Visibility
+from .models import MemoryKind, Scope, SearchResult, Visibility
 from .scope import parse_scope
 
 logger = logging.getLogger(__name__)
@@ -31,27 +40,27 @@ logger = logging.getLogger(__name__)
 TOOLS: list[Tool] = [
     Tool(
         name="memory_store",
-        description="Store a memory for future recall",
+        description="Store a memory for future recall. Use this to save facts, preferences, episodes, rules, or corrections that should be remembered across conversations.",
         inputSchema={
             "type": "object",
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "The memory to store",
+                    "description": "The memory to store (be specific and self-contained)",
                 },
                 "kind": {
                     "type": "string",
                     "enum": ["fact", "preference", "episode", "rule", "relation", "correction", "summary"],
-                    "description": "Type of memory (auto-classified if omitted)",
+                    "description": "Type of memory. fact=objective info, preference=user likes/dislikes, episode=event that happened, rule=instruction/constraint, correction=fix to prior knowledge",
                 },
                 "tags": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Labels for organizing the memory",
+                    "description": "Labels for organizing and filtering (e.g. ['project', 'deadline'])",
                 },
                 "scope": {
                     "type": "string",
-                    "description": "Scope path, e.g. 'org:acme/team:support/user:wang'",
+                    "description": "Namespace path, e.g. 'user:alice' or 'org:acme/team:eng/user:bob'. Controls visibility in multi-agent setups.",
                 },
             },
             "required": ["content"],
@@ -59,23 +68,28 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="memory_recall",
-        description="Search memories relevant to a query",
+        description="Search for relevant memories. Returns memories semantically similar to the query, ranked by relevance. Use before answering questions that might rely on prior context.",
         inputSchema={
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "What to search for",
+                    "description": "What to search for (natural language)",
                 },
                 "top_k": {
                     "type": "integer",
                     "default": 5,
-                    "description": "Maximum number of results to return",
+                    "description": "Maximum number of results (default: 5)",
                 },
                 "kinds": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Filter by memory kinds",
+                    "description": "Filter by memory kinds (e.g. ['fact', 'preference'])",
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Filter by tags (AND logic — all must match)",
                 },
                 "scope": {
                     "type": "string",
@@ -87,7 +101,7 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="memory_forget",
-        description="Remove a specific memory",
+        description="Remove a specific memory by ID. Use when information is outdated, incorrect, or user requests deletion.",
         inputSchema={
             "type": "object",
             "properties": {
@@ -97,7 +111,7 @@ TOOLS: list[Tool] = [
                 },
                 "reason": {
                     "type": "string",
-                    "description": "Why this memory should be removed",
+                    "description": "Why this memory should be removed (for audit trail)",
                 },
             },
             "required": ["id"],
@@ -105,7 +119,7 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="memory_update",
-        description="Update an existing memory with new information",
+        description="Update an existing memory with new/corrected information. Previous version is preserved in history.",
         inputSchema={
             "type": "object",
             "properties": {
@@ -117,6 +131,11 @@ TOOLS: list[Tool] = [
                     "type": "string",
                     "description": "Updated memory content",
                 },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Updated tags (replaces existing)",
+                },
             },
             "required": ["id", "content"],
         },
@@ -125,26 +144,78 @@ TOOLS: list[Tool] = [
 
 
 class SynapseMCPServer:
-    """MCP server bridging MCP tool calls to the Synapse client.
+    """MCP server for Synapse memory operations.
+
+    Supports two backends:
+    - Local: Embedded SQLite + optional vector search (default)
+    - Remote: Connects to a Synapse gRPC/REST server
 
     Args:
-        endpoint: Synapse server endpoint
-        token: Authentication token
-        default_scope: Default scope for operations
+        endpoint: Remote Synapse server endpoint. None = local mode.
+        token: Authentication token for remote mode.
+        db_path: SQLite database path for local mode.
+        default_scope: Default scope for all operations.
+        embedding: Embedding provider ('auto', 'openai', 'local', 'none')
     """
 
     def __init__(
         self,
-        endpoint: str,
+        endpoint: Optional[str] = None,
         token: Optional[str] = None,
+        db_path: Optional[Path] = None,
         default_scope: Optional[str] = None,
+        embedding: str = "auto",
     ) -> None:
         self._endpoint = endpoint
         self._token = token
+        self._db_path = db_path
         self._default_scope_path = default_scope
-        self._client: Optional[SynapseClient] = None
+        self._embedding_choice = embedding
+        self._store = None
+        self._remote_client = None
         self._server = Server("synapse-memory")
         self._setup_handlers()
+
+    def _get_store(self):
+        """Lazy-initialize the local store."""
+        if self._store is None:
+            from .local_store import LocalStore
+            from .embeddings import auto_embedding, openai_embedding, local_embedding
+
+            # Choose embedding provider
+            embedding_fn = None
+            if self._embedding_choice == "auto":
+                embedding_fn = auto_embedding()
+            elif self._embedding_choice == "openai":
+                embedding_fn = openai_embedding()
+            elif self._embedding_choice == "local":
+                embedding_fn = local_embedding()
+            # else: "none" — no embeddings, keyword search only
+
+            self._store = LocalStore(db_path=self._db_path, embedding_fn=embedding_fn)
+        return self._store
+
+    async def _get_remote_client(self):
+        """Lazy-initialize the remote client."""
+        if self._remote_client is None:
+            from .client import SynapseClient
+
+            default_scope = None
+            if self._default_scope_path:
+                default_scope = parse_scope(self._default_scope_path)
+
+            self._remote_client = SynapseClient(
+                self._endpoint,
+                token=self._token,
+                default_scope=default_scope,
+                transport="auto",
+            )
+            await self._remote_client.connect()
+        return self._remote_client
+
+    @property
+    def _is_remote(self) -> bool:
+        return self._endpoint is not None
 
     def _setup_handlers(self) -> None:
         """Register MCP tool handlers."""
@@ -162,84 +233,143 @@ class SynapseMCPServer:
                 logger.exception("Tool call failed: %s", name)
                 return [TextContent(type="text", text=f"Error: {e}")]
 
-    async def _get_client(self) -> SynapseClient:
-        """Get or create the Synapse client."""
-        if self._client is None:
-            default_scope: Optional[Scope] = None
-            if self._default_scope_path:
-                default_scope = parse_scope(self._default_scope_path)
-
-            self._client = SynapseClient(
-                self._endpoint,
-                token=self._token,
-                default_scope=default_scope,
-                transport="auto",
-            )
-            await self._client.connect()
-        return self._client
-
     async def _dispatch_tool(self, name: str, arguments: dict[str, Any]) -> str:
-        """Dispatch a tool call to the appropriate handler."""
-        client = await self._get_client()
+        """Route tool call to local or remote backend."""
+        if self._is_remote:
+            return await self._dispatch_remote(name, arguments)
+        else:
+            return await self._dispatch_local(name, arguments)
+
+    # ─── Local dispatch ───────────────────────────────────────────────
+
+    async def _dispatch_local(self, name: str, arguments: dict[str, Any]) -> str:
+        """Handle tool calls using local SQLite store."""
+        store = self._get_store()
 
         if name == "memory_store":
-            return await self._handle_store(client, arguments)
+            return self._local_store(store, arguments)
         elif name == "memory_recall":
-            return await self._handle_recall(client, arguments)
+            return self._local_recall(store, arguments)
         elif name == "memory_forget":
-            return await self._handle_forget(client, arguments)
+            return self._local_forget(store, arguments)
         elif name == "memory_update":
-            return await self._handle_update(client, arguments)
+            return self._local_update(store, arguments)
         else:
             raise ValueError(f"Unknown tool: {name}")
 
-    async def _handle_store(self, client: SynapseClient, args: dict[str, Any]) -> str:
-        """Handle memory_store tool call."""
-        content = args["content"]
-
-        # Parse optional scope
-        scope: Optional[Scope] = None
-        if "scope" in args and args["scope"]:
-            scope = parse_scope(args["scope"])
-
-        # Parse optional kind
-        kind: Optional[MemoryKind] = None
-        if "kind" in args and args["kind"]:
-            kind = MemoryKind(args["kind"])
-
+    def _local_store(self, store, args: dict[str, Any]) -> str:
+        scope = parse_scope(args["scope"]) if args.get("scope") else self._parse_default_scope()
+        kind = MemoryKind(args["kind"]) if args.get("kind") else None
         tags = args.get("tags")
 
-        record = await client.add(
-            content,
+        record = store.add(
+            content=args["content"],
             scope=scope,
             kind=kind,
             tags=tags,
         )
 
         return (
-            f"Memory stored successfully.\n"
-            f"ID: {record.id}\n"
-            f"Kind: {record.kind.value}\n"
-            f"Confidence: {record.confidence}"
+            f"✓ Memory stored\n"
+            f"  ID: {record.id}\n"
+            f"  Kind: {record.kind.value}\n"
+            f"  Tags: {record.tags}"
         )
 
-    async def _handle_recall(self, client: SynapseClient, args: dict[str, Any]) -> str:
-        """Handle memory_recall tool call."""
-        query = args["query"]
+    def _local_recall(self, store, args: dict[str, Any]) -> str:
+        scope = parse_scope(args["scope"]) if args.get("scope") else self._parse_default_scope()
         top_k = args.get("top_k", 5)
+        kinds = [MemoryKind(k) for k in args["kinds"]] if args.get("kinds") else None
+        tags = args.get("tags")
 
-        # Parse optional scope
-        scope: Optional[Scope] = None
-        if "scope" in args and args["scope"]:
-            scope = parse_scope(args["scope"])
+        results = store.search(
+            query=args["query"],
+            scope=scope,
+            top_k=top_k,
+            kinds=kinds,
+            tags=tags,
+        )
 
-        # Parse optional kinds
-        kinds: Optional[list[MemoryKind]] = None
-        if "kinds" in args and args["kinds"]:
-            kinds = [MemoryKind(k) for k in args["kinds"]]
+        if not results:
+            return "No memories found matching your query."
+
+        return self._format_results(results)
+
+    def _local_forget(self, store, args: dict[str, Any]) -> str:
+        record_id = args["id"]
+        deleted = store.forget(record_id)
+
+        if deleted:
+            msg = f"✓ Memory {record_id} forgotten."
+            if args.get("reason"):
+                msg += f"\n  Reason: {args['reason']}"
+            return msg
+        else:
+            return f"✗ Memory {record_id} not found."
+
+    def _local_update(self, store, args: dict[str, Any]) -> str:
+        record_id = args["id"]
+        tags = args.get("tags")
+
+        record = store.update(
+            record_id,
+            content=args["content"],
+            tags=tags,
+        )
+
+        if record:
+            return (
+                f"✓ Memory updated\n"
+                f"  ID: {record.id}\n"
+                f"  Version: {record.version}\n"
+                f"  Content: {record.content[:100]}{'...' if len(record.content) > 100 else ''}"
+            )
+        else:
+            return f"✗ Memory {record_id} not found."
+
+    # ─── Remote dispatch ──────────────────────────────────────────────
+
+    async def _dispatch_remote(self, name: str, arguments: dict[str, Any]) -> str:
+        """Handle tool calls using remote Synapse server."""
+        client = await self._get_remote_client()
+
+        if name == "memory_store":
+            return await self._remote_store(client, arguments)
+        elif name == "memory_recall":
+            return await self._remote_recall(client, arguments)
+        elif name == "memory_forget":
+            return await self._remote_forget(client, arguments)
+        elif name == "memory_update":
+            return await self._remote_update(client, arguments)
+        else:
+            raise ValueError(f"Unknown tool: {name}")
+
+    async def _remote_store(self, client, args: dict[str, Any]) -> str:
+        scope = parse_scope(args["scope"]) if args.get("scope") else None
+        kind = MemoryKind(args["kind"]) if args.get("kind") else None
+        tags = args.get("tags")
+
+        record = await client.add(
+            content=args["content"],
+            scope=scope,
+            kind=kind,
+            tags=tags,
+        )
+
+        return (
+            f"✓ Memory stored\n"
+            f"  ID: {record.id}\n"
+            f"  Kind: {record.kind.value}\n"
+            f"  Tags: {record.tags}"
+        )
+
+    async def _remote_recall(self, client, args: dict[str, Any]) -> str:
+        scope = parse_scope(args["scope"]) if args.get("scope") else None
+        top_k = args.get("top_k", 5)
+        kinds = [MemoryKind(k) for k in args["kinds"]] if args.get("kinds") else None
 
         results = await client.search(
-            query,
+            query=args["query"],
             scope=scope,
             top_k=top_k,
             kinds=kinds,
@@ -248,68 +378,104 @@ class SynapseMCPServer:
         if not results:
             return "No memories found matching your query."
 
-        # Format results using to_context for LLM-friendly output
-        return client.to_context(results)
+        return self._format_results(results)
 
-    async def _handle_forget(self, client: SynapseClient, args: dict[str, Any]) -> str:
-        """Handle memory_forget tool call."""
-        memory_id = args["id"]
-        reason = args.get("reason", "")
-
-        deleted = await client.forget(id=memory_id)
+    async def _remote_forget(self, client, args: dict[str, Any]) -> str:
+        record_id = args["id"]
+        deleted = await client.forget(id=record_id)
 
         if deleted > 0:
-            msg = f"Memory {memory_id} forgotten."
-            if reason:
-                msg += f" Reason: {reason}"
+            msg = f"✓ Memory {record_id} forgotten."
+            if args.get("reason"):
+                msg += f"\n  Reason: {args['reason']}"
             return msg
         else:
-            return f"Memory {memory_id} not found."
+            return f"✗ Memory {record_id} not found."
 
-    async def _handle_update(self, client: SynapseClient, args: dict[str, Any]) -> str:
-        """Handle memory_update tool call."""
-        memory_id = args["id"]
-        content = args["content"]
-
-        record = await client.update(memory_id, content)
+    async def _remote_update(self, client, args: dict[str, Any]) -> str:
+        record = await client.update(args["id"], args["content"])
 
         return (
-            f"Memory updated successfully.\n"
-            f"ID: {record.id}\n"
-            f"Version: {record.version}\n"
-            f"Content: {record.content[:100]}{'...' if len(record.content) > 100 else ''}"
+            f"✓ Memory updated\n"
+            f"  ID: {record.id}\n"
+            f"  Version: {record.version}\n"
+            f"  Content: {record.content[:100]}{'...' if len(record.content) > 100 else ''}"
         )
+
+    # ─── Helpers ──────────────────────────────────────────────────────
+
+    def _parse_default_scope(self) -> Optional[Scope]:
+        if self._default_scope_path:
+            return parse_scope(self._default_scope_path)
+        return None
+
+    @staticmethod
+    def _format_results(results: list[SearchResult]) -> str:
+        """Format search results for LLM consumption."""
+        lines = [f"Found {len(results)} relevant memories:\n"]
+        for i, r in enumerate(results, 1):
+            score_str = f"{r.score:.2f}" if r.score else "—"
+            kind_str = r.record.kind.value if r.record.kind else "unknown"
+            tags_str = ", ".join(r.record.tags) if r.record.tags else ""
+            lines.append(f"[{i}] (score: {score_str}, kind: {kind_str})")
+            if tags_str:
+                lines.append(f"    tags: {tags_str}")
+            lines.append(f"    id: {r.record.id}")
+            lines.append(f"    {r.record.content}")
+            lines.append("")
+        return "\n".join(lines)
 
     async def run(self) -> None:
         """Run the MCP server on stdio."""
-        logger.info("Starting Synapse MCP server (endpoint: %s)", self._endpoint)
+        mode = "remote" if self._is_remote else "local"
+        logger.info("Starting Synapse MCP server (mode: %s)", mode)
+        if self._is_remote:
+            logger.info("Remote endpoint: %s", self._endpoint)
+        else:
+            db = self._db_path or Path.home() / ".synapse" / "memories.db"
+            logger.info("Database: %s", db)
+
         try:
             await run_server(self._server)
         finally:
-            if self._client:
-                await self._client.close()
+            if self._store:
+                self._store.close()
+            if self._remote_client:
+                await self._remote_client.close()
 
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="Synapse Memory Protocol MCP Server",
+        description="Synapse Memory — MCP server for persistent AI memory",
         prog="synapse-mcp",
     )
     parser.add_argument(
         "--endpoint",
-        default="localhost:9090",
-        help="Synapse server endpoint (default: localhost:9090)",
+        default=None,
+        help="Remote Synapse server endpoint (host:port). Omit for local mode.",
     )
     parser.add_argument(
         "--token",
         default=None,
-        help="Authentication token",
+        help="Authentication token for remote mode",
+    )
+    parser.add_argument(
+        "--db",
+        default=None,
+        type=Path,
+        help="SQLite database path for local mode (default: ~/.synapse/memories.db)",
     )
     parser.add_argument(
         "--scope",
         default=None,
-        help="Default scope path (e.g. 'org:acme/user:wang')",
+        help="Default scope path (e.g. 'user:alice' or 'org:acme/team:eng')",
+    )
+    parser.add_argument(
+        "--embedding",
+        default="auto",
+        choices=["auto", "openai", "local", "none"],
+        help="Embedding provider: auto (detect), openai (API), local (sentence-transformers), none (keyword only)",
     )
     parser.add_argument(
         "--log-level",
@@ -333,7 +499,9 @@ def main() -> None:
     server = SynapseMCPServer(
         endpoint=args.endpoint,
         token=args.token,
+        db_path=args.db,
         default_scope=args.scope,
+        embedding=args.embedding,
     )
 
     asyncio.run(server.run())
