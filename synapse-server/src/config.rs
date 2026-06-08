@@ -15,6 +15,22 @@ pub struct Config {
 
     #[serde(default)]
     pub conflict: ConflictConfig,
+
+    /// Authentication token. Also overridable via SYNAPSE_AUTH_TOKEN env var.
+    #[serde(default)]
+    pub auth_token: Option<String>,
+
+    /// Cluster join secret. Nodes must present this to join.
+    #[serde(default)]
+    pub cluster_secret: Option<String>,
+
+    /// Maximum content size in bytes (default: 1MB).
+    #[serde(default = "default_max_content_bytes")]
+    pub max_content_bytes: usize,
+
+    /// Maximum embedding dimensions (default: 4096).
+    #[serde(default = "default_max_embedding_dims")]
+    pub max_embedding_dims: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -112,6 +128,14 @@ fn default_resolution_strategy() -> String {
     "last_writer_wins".to_string()
 }
 
+fn default_max_content_bytes() -> usize {
+    1_048_576 // 1MB
+}
+
+fn default_max_embedding_dims() -> usize {
+    4096
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -119,6 +143,10 @@ impl Default for Config {
             cluster: ClusterConfig::default(),
             storage: StorageConfig::default(),
             conflict: ConflictConfig::default(),
+            auth_token: None,
+            cluster_secret: None,
+            max_content_bytes: default_max_content_bytes(),
+            max_embedding_dims: default_max_embedding_dims(),
         }
     }
 }

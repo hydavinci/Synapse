@@ -58,12 +58,19 @@ pub mod proto {
 }
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use tokio::signal;
 use tokio::sync::broadcast;
 use tonic::transport::Server;
+use tonic_health::server::health_reporter;
+use tower::limit::RateLimitLayer;
 use tracing::info;
 
+mod auth;
+
 use api::grpc::{ClusterServiceImpl, ConflictServiceImpl, MemoryServiceImpl};
+use auth::AuthInterceptor;
 use cluster::ClusterNode;
 use config::Config;
 use conflict::ConflictDetector;
@@ -105,13 +112,34 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Initialize cluster node
-    let cluster = Arc::new(ClusterNode::new(
+    let cluster = Arc::new(ClusterNode::with_secret(
         config.cluster.node_id.clone(),
         config.listen_addr(),
+        config.cluster_secret.clone(),
     ));
 
     // Event broadcast channel
     let (events_tx, _) = broadcast::channel::<proto::MemoryEvent>(1024);
+
+    // Health reporter (gRPC health checking protocol)
+    let (mut health_reporter, health_service) = health_reporter();
+    health_reporter
+        .set_serving::<MemoryServiceServer<MemoryServiceImpl>>()
+        .await;
+    health_reporter
+        .set_serving::<ConflictServiceServer<ConflictServiceImpl>>()
+        .await;
+    health_reporter
+        .set_serving::<ClusterServiceServer<ClusterServiceImpl>>()
+        .await;
+
+    // Authentication interceptor
+    let auth = AuthInterceptor::from_config(&config);
+    if auth.is_enabled() {
+        info!("Authentication enabled (Bearer token)");
+    } else {
+        tracing::warn!("Authentication DISABLED — server is open to all. Set SYNAPSE_AUTH_TOKEN to secure.");
+    }
 
     // Build gRPC services
     let memory_service = MemoryServiceImpl::new(
@@ -130,13 +158,44 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Synapse server listening on {}", addr);
 
-    // Start server
+    // Start server with graceful shutdown
+    // CVE-13: Global rate limit — 1000 requests/second across all services
+    let rate_limit = RateLimitLayer::new(1000, Duration::from_secs(1));
+
     Server::builder()
-        .add_service(MemoryServiceServer::new(memory_service))
-        .add_service(ConflictServiceServer::new(conflict_service))
-        .add_service(ClusterServiceServer::new(cluster_service))
-        .serve(addr)
+        .layer(rate_limit)
+        .add_service(health_service)
+        .add_service(MemoryServiceServer::with_interceptor(memory_service, auth.clone()))
+        .add_service(ConflictServiceServer::with_interceptor(conflict_service, auth.clone()))
+        .add_service(ClusterServiceServer::with_interceptor(cluster_service, auth))
+        .serve_with_shutdown(addr, shutdown_signal())
         .await?;
 
+    info!("Synapse server shut down gracefully");
     Ok(())
+}
+
+/// Wait for SIGINT (Ctrl+C) or SIGTERM for graceful shutdown.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => info!("Received Ctrl+C, shutting down..."),
+        _ = terminate => info!("Received SIGTERM, shutting down..."),
+    }
 }

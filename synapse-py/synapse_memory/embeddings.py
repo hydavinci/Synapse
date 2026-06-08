@@ -1,7 +1,7 @@
 """Embedding providers for local vector search.
 
 Supports multiple embedding backends:
-- OpenAI (text-embedding-3-small/large)
+- OpenAI (text-embedding-3-small/large) — async-safe with connection pooling
 - Local sentence-transformers (no API key needed)
 - Custom callable
 
@@ -26,18 +26,24 @@ def openai_embedding(
     model: str = "text-embedding-3-small",
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
+    batch_size: int = 100,
 ) -> EmbeddingFn:
     """Create an OpenAI embedding function.
+
+    Uses a persistent httpx client for connection pooling.
 
     Args:
         model: OpenAI embedding model name
         api_key: API key (falls back to OPENAI_API_KEY env var)
         base_url: Custom API base URL (for compatible APIs like Azure, local)
+        batch_size: Max items per batch (unused in single-call, reserved for future)
 
     Returns:
         A callable that takes text and returns embedding vector.
     """
     import os
+
+    import httpx
 
     key = api_key or os.environ.get("OPENAI_API_KEY")
     if not key:
@@ -45,15 +51,19 @@ def openai_embedding(
             "OpenAI API key required. Set OPENAI_API_KEY env var or pass api_key parameter."
         )
 
-    def _embed(text: str) -> list[float]:
-        import httpx
+    url = (base_url or "https://api.openai.com/v1") + "/embeddings"
 
-        url = (base_url or "https://api.openai.com/v1") + "/embeddings"
-        resp = httpx.post(
+    # Persistent client with connection pooling — avoid creating a new connection per call
+    _client = httpx.Client(
+        headers={"Authorization": f"Bearer {key}"},
+        timeout=30.0,
+        limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+    )
+
+    def _embed(text: str) -> list[float]:
+        resp = _client.post(
             url,
-            headers={"Authorization": f"Bearer {key}"},
             json={"input": text, "model": model},
-            timeout=30.0,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -62,13 +72,57 @@ def openai_embedding(
     return _embed
 
 
+def openai_embedding_batch(
+    texts: list[str],
+    model: str = "text-embedding-3-small",
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> list[list[float]]:
+    """Batch embed multiple texts in a single API call.
+
+    OpenAI supports up to 2048 inputs per request. This is much more efficient
+    than calling one-by-one.
+
+    Args:
+        texts: List of texts to embed
+        model: OpenAI embedding model name
+        api_key: API key (falls back to OPENAI_API_KEY env var)
+        base_url: Custom API base URL
+
+    Returns:
+        List of embedding vectors in same order as inputs
+    """
+    import os
+
+    import httpx
+
+    key = api_key or os.environ.get("OPENAI_API_KEY")
+    if not key:
+        raise ValueError("OpenAI API key required.")
+
+    url = (base_url or "https://api.openai.com/v1") + "/embeddings"
+
+    resp = httpx.post(
+        url,
+        headers={"Authorization": f"Bearer {key}"},
+        json={"input": texts, "model": model},
+        timeout=60.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    # OpenAI returns embeddings sorted by index
+    results = sorted(data["data"], key=lambda x: x["index"])
+    return [r["embedding"] for r in results]
+
+
 def local_embedding(
     model_name: str = "all-MiniLM-L6-v2",
 ) -> EmbeddingFn:
     """Create a local sentence-transformers embedding function.
 
     First call downloads the model (~80MB for MiniLM). Subsequent calls are fast.
-    No API key needed.
+    No API key needed. Thread-safe (sentence-transformers handles internal locking).
 
     Args:
         model_name: sentence-transformers model name

@@ -71,6 +71,44 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
     ) -> Result<Response<proto::AddResponse>, Status> {
         let req = request.into_inner();
 
+        // === Input validation (CVE-17: prevent oversized payloads) ===
+        const MAX_CONTENT_BYTES: usize = 1_048_576; // 1MB
+        const MAX_EMBEDDING_DIMS: usize = 4096;
+        const MAX_TAGS: usize = 100;
+        const MAX_TAG_LEN: usize = 256;
+
+        if req.content.is_empty() {
+            return Err(Status::invalid_argument("content must not be empty"));
+        }
+        if req.content.len() > MAX_CONTENT_BYTES {
+            return Err(Status::invalid_argument(format!(
+                "content exceeds maximum size ({} bytes > {} limit)",
+                req.content.len(),
+                MAX_CONTENT_BYTES
+            )));
+        }
+        if req.tags.len() > MAX_TAGS {
+            return Err(Status::invalid_argument(format!(
+                "too many tags ({} > {} limit)",
+                req.tags.len(),
+                MAX_TAGS
+            )));
+        }
+        for tag in &req.tags {
+            if tag.len() > MAX_TAG_LEN {
+                return Err(Status::invalid_argument(format!(
+                    "tag exceeds maximum length ({} > {})",
+                    tag.len(),
+                    MAX_TAG_LEN
+                )));
+            }
+        }
+        if req.confidence < 0.0 || req.confidence > 1.0 {
+            return Err(Status::invalid_argument(
+                "confidence must be between 0.0 and 1.0",
+            ));
+        }
+
         // Generate ID and timestamps
         let id = ulid::Ulid::new().to_string().to_lowercase();
         let now = Self::now_timestamp();
@@ -241,7 +279,8 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
         request: Request<proto::SearchRequest>,
     ) -> Result<Response<proto::SearchResponse>, Status> {
         let req = request.into_inner();
-        let top_k = if req.top_k == 0 { 10 } else { req.top_k } as usize;
+        // CVE-6: Cap top_k to prevent excessive memory allocation
+        let top_k = (if req.top_k == 0 { 10 } else { req.top_k }).min(1000) as usize;
         let min_score = req.min_score;
 
         // If query_embedding is provided, use vector search
@@ -260,10 +299,20 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
                 .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
 
             // Apply scope visibility filter
+            // CVE-4 fix: scope=None means only PUBLIC records are visible
             let visible = if let Some(ref scope) = req.scope {
                 ScopeResolver::filter_visible(&records, scope)
             } else {
+                // No scope provided: only return PUBLIC records
                 records
+                    .into_iter()
+                    .filter(|r| {
+                        r.scope
+                            .as_ref()
+                            .map(|s| s.visibility == proto::Visibility::Public as i32)
+                            .unwrap_or(false)
+                    })
+                    .collect()
             };
 
             // Apply additional filters and build SearchResults
@@ -313,10 +362,19 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
                 .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
 
             // Apply scope visibility
+            // CVE-4 fix: scope=None means only PUBLIC records are visible
             let visible = if let Some(ref scope) = req.scope {
                 ScopeResolver::filter_visible(&records, scope)
             } else {
                 records
+                    .into_iter()
+                    .filter(|r| {
+                        r.scope
+                            .as_ref()
+                            .map(|s| s.visibility == proto::Visibility::Public as i32)
+                            .unwrap_or(false)
+                    })
+                    .collect()
             };
 
             visible
@@ -347,10 +405,19 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
             .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
 
         // Apply scope visibility
+        // CVE-4 fix: scope=None means only PUBLIC records are visible
         let visible = if let Some(ref scope) = req.scope {
             ScopeResolver::filter_visible(&records, scope)
         } else {
             records
+                .into_iter()
+                .filter(|r| {
+                    r.scope
+                        .as_ref()
+                        .map(|s| s.visibility == proto::Visibility::Public as i32)
+                        .unwrap_or(false)
+                })
+                .collect()
         };
 
         Ok(Response::new(proto::ListResponse {
@@ -607,12 +674,24 @@ impl proto::cluster_service_server::ClusterService for ClusterServiceImpl {
         request: Request<proto::JoinRequest>,
     ) -> Result<Response<proto::JoinResponse>, Status> {
         let req = request.into_inner();
-        let status = self.cluster.handle_join(&req.node_id, &req.address).await;
 
-        Ok(Response::new(proto::JoinResponse {
-            accepted: true,
-            cluster_status: Some(status),
-        }))
+        // Validate node_id format (alphanumeric + hyphens, max 64 chars)
+        if req.node_id.is_empty() || req.node_id.len() > 64 {
+            return Err(Status::invalid_argument("node_id must be 1-64 characters"));
+        }
+        if !req.node_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+            return Err(Status::invalid_argument("node_id contains invalid characters"));
+        }
+
+        // handle_join validates cluster secret internally
+        // TODO: Pass secret from request metadata once proto supports it
+        match self.cluster.handle_join(&req.node_id, &req.address, None).await {
+            Ok(status) => Ok(Response::new(proto::JoinResponse {
+                accepted: true,
+                cluster_status: Some(status),
+            })),
+            Err(reason) => Err(Status::permission_denied(reason)),
+        }
     }
 
     async fn leave(

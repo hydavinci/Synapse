@@ -7,12 +7,16 @@ license.workspace = true
 [dependencies]
 # gRPC / Protobuf
 tonic = "0.12"
+tonic-health = "0.12"
 prost = "0.13"
 prost-types = "0.13"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
+
+# Rate limiting
+tower = { version = "0.5", features = ["limit", "buffer"] }
 
 # Serialization / Config
 serde = { version = "1", features = ["derive"] }

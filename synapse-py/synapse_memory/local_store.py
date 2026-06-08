@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -40,7 +41,9 @@ class LocalStore:
     ) -> None:
         self._db_path = db_path or _default_db_path()
         self._embedding_fn = embedding_fn
+        self._lock = threading.Lock()
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
@@ -55,7 +58,7 @@ class LocalStore:
                 scope_team TEXT DEFAULT '',
                 scope_user TEXT DEFAULT '',
                 scope_agent TEXT DEFAULT '',
-                scope_visibility INTEGER DEFAULT 1,
+                scope_visibility TEXT DEFAULT 'private',
                 kind TEXT DEFAULT 'fact',
                 confidence REAL DEFAULT 1.0,
                 tags TEXT DEFAULT '[]',
@@ -106,34 +109,35 @@ class LocalStore:
             embedding = self._embedding_fn(content)
             embedding_blob = self._encode_embedding(embedding)
 
-        self._conn.execute(
-            """INSERT INTO memories
-               (id, content, embedding, scope_org, scope_team, scope_user, scope_agent,
-                scope_visibility, kind, confidence, tags, source, version,
-                created_at, updated_at, accessed_at, expires_at, metadata)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                record_id,
-                content,
-                embedding_blob,
-                scope.org or "",
-                scope.team or "",
-                scope.user or "",
-                scope.agent or "",
-                scope.visibility.value if scope.visibility else Visibility.PRIVATE.value,
-                kind.value,
-                confidence,
-                json.dumps(tags),
-                "",
-                1,
-                now,
-                now,
-                now,
-                None,
-                json.dumps(metadata or {}),
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO memories
+                   (id, content, embedding, scope_org, scope_team, scope_user, scope_agent,
+                    scope_visibility, kind, confidence, tags, source, version,
+                    created_at, updated_at, accessed_at, expires_at, metadata)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    record_id,
+                    content,
+                    embedding_blob,
+                    scope.org or "",
+                    scope.team or "",
+                    scope.user or "",
+                    scope.agent or "",
+                    scope.visibility.value if scope.visibility else Visibility.PRIVATE.value,
+                    kind.value,
+                    confidence,
+                    json.dumps(tags),
+                    "",
+                    1,
+                    now,
+                    now,
+                    now,
+                    None,
+                    json.dumps(metadata or {}),
+                ),
+            )
+            self._conn.commit()
 
         return MemoryRecord(
             id=record_id,
@@ -172,39 +176,40 @@ class LocalStore:
             return None
 
         # Save to history
-        self._conn.execute(
-            "INSERT OR REPLACE INTO memory_history (id, version, content, updated_at) VALUES (?, ?, ?, ?)",
-            (record_id, existing.version, existing.content, existing.updated_at),
-        )
-
-        now = time.time()
-        new_content = content if content is not None else existing.content
-        new_tags = tags if tags is not None else existing.tags
-        new_kind = kind if kind is not None else existing.kind
-        new_confidence = confidence if confidence is not None else existing.confidence
-        new_version = existing.version + 1
-
-        # Recompute embedding if content changed
-        embedding_blob = None
-        if content is not None and self._embedding_fn:
-            embedding = self._embedding_fn(new_content)
-            embedding_blob = self._encode_embedding(embedding)
-
-        if embedding_blob:
+        with self._lock:
             self._conn.execute(
-                """UPDATE memories SET content=?, embedding=?, tags=?, kind=?,
-                   confidence=?, version=?, updated_at=? WHERE id=?""",
-                (new_content, embedding_blob, json.dumps(new_tags), new_kind.value,
-                 new_confidence, new_version, now, record_id),
+                "INSERT OR REPLACE INTO memory_history (id, version, content, updated_at) VALUES (?, ?, ?, ?)",
+                (record_id, existing.version, existing.content, existing.updated_at),
             )
-        else:
-            self._conn.execute(
-                """UPDATE memories SET content=?, tags=?, kind=?,
-                   confidence=?, version=?, updated_at=? WHERE id=?""",
-                (new_content, json.dumps(new_tags), new_kind.value,
-                 new_confidence, new_version, now, record_id),
-            )
-        self._conn.commit()
+
+            now = time.time()
+            new_content = content if content is not None else existing.content
+            new_tags = tags if tags is not None else existing.tags
+            new_kind = kind if kind is not None else existing.kind
+            new_confidence = confidence if confidence is not None else existing.confidence
+            new_version = existing.version + 1
+
+            # Recompute embedding if content changed
+            embedding_blob = None
+            if content is not None and self._embedding_fn:
+                embedding = self._embedding_fn(new_content)
+                embedding_blob = self._encode_embedding(embedding)
+
+            if embedding_blob:
+                self._conn.execute(
+                    """UPDATE memories SET content=?, embedding=?, tags=?, kind=?,
+                       confidence=?, version=?, updated_at=? WHERE id=?""",
+                    (new_content, embedding_blob, json.dumps(new_tags), new_kind.value,
+                     new_confidence, new_version, now, record_id),
+                )
+            else:
+                self._conn.execute(
+                    """UPDATE memories SET content=?, tags=?, kind=?,
+                       confidence=?, version=?, updated_at=? WHERE id=?""",
+                    (new_content, json.dumps(new_tags), new_kind.value,
+                     new_confidence, new_version, now, record_id),
+                )
+            self._conn.commit()
 
         return MemoryRecord(
             id=record_id,
@@ -220,8 +225,9 @@ class LocalStore:
 
     def forget(self, record_id: str) -> bool:
         """Delete a record by ID."""
-        cursor = self._conn.execute("DELETE FROM memories WHERE id = ?", (record_id,))
-        self._conn.commit()
+        with self._lock:
+            cursor = self._conn.execute("DELETE FROM memories WHERE id = ?", (record_id,))
+            self._conn.commit()
         return cursor.rowcount > 0
 
     def search(
@@ -336,7 +342,11 @@ class LocalStore:
         min_score: float,
         tags: Optional[list[str]],
     ) -> list[SearchResult]:
-        """Cosine similarity search over stored embeddings."""
+        """Cosine similarity search over stored embeddings.
+
+        CVE-8 fix: Processes embeddings in batches to avoid loading all into memory at once.
+        Uses streaming cursor with batch_size=1000.
+        """
         import numpy as np
 
         query_vec = np.array(query_embedding, dtype=np.float32)
@@ -345,33 +355,47 @@ class LocalStore:
             return []
         query_vec = query_vec / query_norm
 
-        rows = self._conn.execute(
+        # Use batched fetching to avoid OOM on large corpora
+        BATCH_SIZE = 1000
+        cursor = self._conn.execute(
             f"SELECT * FROM memories WHERE {where} AND embedding IS NOT NULL",
             params,
-        ).fetchall()
+        )
 
         scored: list[tuple[float, sqlite3.Row]] = []
-        for row in rows:
-            embedding_blob = row[2]  # embedding column
-            if not embedding_blob:
-                continue
+        while True:
+            rows = cursor.fetchmany(BATCH_SIZE)
+            if not rows:
+                break
 
-            stored_vec = np.frombuffer(embedding_blob, dtype=np.float32)
-            stored_norm = np.linalg.norm(stored_vec)
-            if stored_norm == 0:
-                continue
+            for row in rows:
+                embedding_blob = row["embedding"]
+                if not embedding_blob:
+                    continue
 
-            score = float(np.dot(query_vec, stored_vec / stored_norm))
+                stored_vec = np.frombuffer(embedding_blob, dtype=np.float32)
+                stored_norm = np.linalg.norm(stored_vec)
+                if stored_norm == 0:
+                    continue
 
-            if score >= min_score:
-                # Tag filter
-                if tags:
-                    record_tags = json.loads(row[10])  # tags column
-                    if not all(t in record_tags for t in tags):
-                        continue
-                scored.append((score, row))
+                score = float(np.dot(query_vec, stored_vec / stored_norm))
 
-        # Sort by score descending
+                if score >= min_score:
+                    # Tag filter
+                    if tags:
+                        record_tags = json.loads(row["tags"])
+                        if not all(t in record_tags for t in tags):
+                            continue
+
+                    # Keep only top_k best scores (min-heap emulation)
+                    if len(scored) < top_k:
+                        scored.append((score, row))
+                    elif score > scored[0][0]:
+                        # Replace lowest score
+                        scored[0] = (score, row)
+                        scored.sort(key=lambda x: x[0])  # Re-sort to keep min at [0]
+
+        # Sort by score descending for output
         scored.sort(key=lambda x: x[0], reverse=True)
 
         results = []
@@ -400,12 +424,12 @@ class LocalStore:
 
         scored: list[tuple[float, sqlite3.Row]] = []
         for row in rows:
-            content: str = row[1]  # content column
+            content: str = row["content"]
             content_lower = content.lower()
 
             # Tag filter
             if tags:
-                record_tags = json.loads(row[10])
+                record_tags = json.loads(row["tags"])
                 if not all(t in record_tags for t in tags):
                     continue
 
@@ -427,21 +451,21 @@ class LocalStore:
     def _row_to_record(self, row) -> MemoryRecord:
         """Convert a database row to a MemoryRecord."""
         return MemoryRecord(
-            id=row[0],
-            content=row[1],
+            id=row["id"],
+            content=row["content"],
             scope=Scope(
-                org=row[3] or None,
-                team=row[4] or None,
-                user=row[5] or None,
-                agent=row[6] or None,
-                visibility=Visibility(row[7]) if row[7] else None,
+                org=row["scope_org"] or None,
+                team=row["scope_team"] or None,
+                user=row["scope_user"] or None,
+                agent=row["scope_agent"] or None,
+                visibility=Visibility(row["scope_visibility"]) if row["scope_visibility"] else None,
             ),
-            kind=MemoryKind(row[8]),
-            confidence=row[9],
-            tags=json.loads(row[10]),
-            version=row[12],
-            created_at=row[13],
-            updated_at=row[14],
+            kind=MemoryKind(row["kind"]),
+            confidence=row["confidence"],
+            tags=json.loads(row["tags"]),
+            version=row["version"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
         )
 
     @staticmethod
@@ -453,3 +477,13 @@ class LocalStore:
     def close(self) -> None:
         """Close the database connection."""
         self._conn.close()
+
+    def cleanup_expired(self) -> int:
+        """Remove expired memories (where expires_at < now). Returns count deleted."""
+        now = time.time()
+        cursor = self._conn.execute(
+            "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?",
+            (now,),
+        )
+        self._conn.commit()
+        return cursor.rowcount

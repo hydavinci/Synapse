@@ -7,6 +7,18 @@ use tracing::info;
 
 use crate::proto;
 
+/// Constant-time comparison to prevent timing attacks.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Represents this node in a cluster.
 /// For v0.1, this is a single-node implementation with stubs for multi-node operations.
 pub struct ClusterNode {
@@ -20,10 +32,18 @@ pub struct ClusterNode {
     peers: Arc<RwLock<HashMap<String, proto::Node>>>,
     /// Total records tracked
     record_count: Arc<RwLock<u64>>,
+    /// Cluster join secret (nodes must present this to join)
+    cluster_secret: Option<String>,
+    /// Maximum allowed peers (prevent clock HashMap explosion from malicious joins)
+    max_peers: usize,
 }
 
 impl ClusterNode {
     pub fn new(node_id: String, address: String) -> Self {
+        Self::with_secret(node_id, address, None)
+    }
+
+    pub fn with_secret(node_id: String, address: String, cluster_secret: Option<String>) -> Self {
         info!(node_id = %node_id, address = %address, "Initializing cluster node");
         Self {
             node_id: node_id.clone(),
@@ -31,6 +51,8 @@ impl ClusterNode {
             clock: Arc::new(RwLock::new(HashMap::from([(node_id, 0)]))),
             peers: Arc::new(RwLock::new(HashMap::new())),
             record_count: Arc::new(RwLock::new(0)),
+            cluster_secret,
+            max_peers: 100, // Prevent clock explosion from malicious joins
         }
     }
 
@@ -65,8 +87,32 @@ impl ClusterNode {
         *rc = count;
     }
 
-    /// Handle a join request (stub for multi-node).
-    pub async fn handle_join(&self, node_id: &str, address: &str) -> proto::ClusterStatus {
+    /// Handle a join request with secret validation.
+    pub async fn handle_join(
+        &self,
+        node_id: &str,
+        address: &str,
+        secret: Option<&str>,
+    ) -> Result<proto::ClusterStatus, &'static str> {
+        // Validate cluster secret if configured
+        if let Some(ref expected) = self.cluster_secret {
+            match secret {
+                Some(s) if constant_time_eq(s.as_bytes(), expected.as_bytes()) => {}
+                _ => {
+                    tracing::warn!(peer = node_id, "Cluster join rejected: invalid secret");
+                    return Err("invalid cluster secret");
+                }
+            }
+        }
+
+        // Enforce max peers to prevent resource exhaustion
+        let peers = self.peers.read().await;
+        if peers.len() >= self.max_peers {
+            tracing::warn!(peer = node_id, max = self.max_peers, "Cluster join rejected: max peers reached");
+            return Err("maximum peer count reached");
+        }
+        drop(peers);
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
@@ -87,8 +133,9 @@ impl ClusterNode {
         let mut peers = self.peers.write().await;
         peers.insert(node_id.to_string(), new_node);
         info!(peer = node_id, "Peer joined cluster");
+        drop(peers);
 
-        self.get_status().await
+        Ok(self.get_status().await)
     }
 
     /// Handle a leave request (stub for multi-node).
