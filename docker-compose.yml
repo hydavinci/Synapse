@@ -1,0 +1,148 @@
+# ============================================================================
+# Synapse Memory Protocol — Example 3-Node Cluster
+# ============================================================================
+# Usage:
+#   docker compose up -d          # Start all nodes
+#   docker compose ps             # Check status
+#   docker compose logs -f        # Follow logs
+#   docker compose down -v        # Tear down with volumes
+# ============================================================================
+
+services:
+  # ─── Node 1 (Primary seed node) ───────────────────────────────────────────
+  synapse-1:
+    build: .
+    container_name: synapse-1
+    ports:
+      - "9090:9090"   # gRPC
+      - "9091:9091"   # HTTP/REST + Health
+    environment:
+      SYNAPSE_NODE_ID: node-1
+      SYNAPSE_HOST: "0.0.0.0"
+      SYNAPSE_GRPC_PORT: "9090"
+      SYNAPSE_HTTP_PORT: "9091"
+      SYNAPSE_CLUSTER_PEERS: "synapse-2:9090,synapse-3:9090"
+      SYNAPSE_CLUSTER_SEED: "true"
+      SYNAPSE_CONSISTENCY: "eventual"
+      SYNAPSE_DATA_DIR: "/opt/synapse/data"
+      SYNAPSE_LOG_LEVEL: "info"
+      SYNAPSE_EMBEDDING_MODEL: "all-MiniLM-L6-v2"
+      SYNAPSE_VECTOR_BACKEND: "qdrant"
+      SYNAPSE_VECTOR_URL: "http://qdrant:6334"
+    volumes:
+      - synapse-data-1:/opt/synapse/data
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    networks:
+      - synapse-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9091/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ─── Node 2 ───────────────────────────────────────────────────────────────
+  synapse-2:
+    build: .
+    container_name: synapse-2
+    ports:
+      - "9092:9090"   # gRPC (mapped to host 9092)
+      - "9093:9091"   # HTTP
+    environment:
+      SYNAPSE_NODE_ID: node-2
+      SYNAPSE_HOST: "0.0.0.0"
+      SYNAPSE_GRPC_PORT: "9090"
+      SYNAPSE_HTTP_PORT: "9091"
+      SYNAPSE_CLUSTER_PEERS: "synapse-1:9090,synapse-3:9090"
+      SYNAPSE_CLUSTER_SEED: "false"
+      SYNAPSE_CONSISTENCY: "eventual"
+      SYNAPSE_DATA_DIR: "/opt/synapse/data"
+      SYNAPSE_LOG_LEVEL: "info"
+      SYNAPSE_EMBEDDING_MODEL: "all-MiniLM-L6-v2"
+      SYNAPSE_VECTOR_BACKEND: "qdrant"
+      SYNAPSE_VECTOR_URL: "http://qdrant:6334"
+    volumes:
+      - synapse-data-2:/opt/synapse/data
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    networks:
+      - synapse-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9091/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ─── Node 3 ───────────────────────────────────────────────────────────────
+  synapse-3:
+    build: .
+    container_name: synapse-3
+    ports:
+      - "9094:9090"   # gRPC (mapped to host 9094)
+      - "9095:9091"   # HTTP
+    environment:
+      SYNAPSE_NODE_ID: node-3
+      SYNAPSE_HOST: "0.0.0.0"
+      SYNAPSE_GRPC_PORT: "9090"
+      SYNAPSE_HTTP_PORT: "9091"
+      SYNAPSE_CLUSTER_PEERS: "synapse-1:9090,synapse-2:9090"
+      SYNAPSE_CLUSTER_SEED: "false"
+      SYNAPSE_CONSISTENCY: "eventual"
+      SYNAPSE_DATA_DIR: "/opt/synapse/data"
+      SYNAPSE_LOG_LEVEL: "info"
+      SYNAPSE_EMBEDDING_MODEL: "all-MiniLM-L6-v2"
+      SYNAPSE_VECTOR_BACKEND: "qdrant"
+      SYNAPSE_VECTOR_URL: "http://qdrant:6334"
+    volumes:
+      - synapse-data-3:/opt/synapse/data
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    networks:
+      - synapse-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9091/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ─── Vector Database Backend ──────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:v1.10.1
+    container_name: synapse-qdrant
+    ports:
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - synapse-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  synapse-data-1:
+    driver: local
+  synapse-data-2:
+    driver: local
+  synapse-data-3:
+    driver: local
+  qdrant-data:
+    driver: local
+
+networks:
+  synapse-net:
+    driver: bridge

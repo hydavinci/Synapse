@@ -1,0 +1,85 @@
+syntax = "proto3";
+package synapse.v1;
+
+import "google/protobuf/timestamp.proto";
+import "synapse/v1/memory.proto";
+
+// === Conflict Types ===
+
+enum ConflictStatus {
+  CONFLICT_STATUS_UNSPECIFIED = 0;
+  PENDING = 1;
+  AUTO_RESOLVED = 2;
+  MANUAL = 3;
+  DISCARDED = 4;
+}
+
+enum ResolutionStrategy {
+  RESOLUTION_STRATEGY_UNSPECIFIED = 0;
+  LAST_WRITER_WINS = 1;
+  FIRST_WRITER_WINS = 2;
+  LLM_MERGE = 3;
+  KEEP_BOTH = 4;
+  MANUAL_RESOLUTION = 5;
+  CONFIDENCE_WINS = 6;
+  CUSTOM = 7;
+}
+
+message Conflict {
+  string id = 1;
+  repeated MemoryRecord records = 2;
+  google.protobuf.Timestamp detected_at = 3;
+  ConflictStatus status = 4;
+  Resolution resolution = 5;
+}
+
+message Resolution {
+  ResolutionStrategy strategy = 1;
+  MemoryRecord result = 2;
+  string reasoning = 3;
+  string resolved_by = 4;
+  google.protobuf.Timestamp resolved_at = 5;
+}
+
+// === Conflict Service Requests/Responses ===
+
+message ListConflictsRequest {
+  Scope scope = 1;
+  ConflictStatus status = 2;
+  uint32 limit = 3;
+  uint32 offset = 4;
+}
+
+message ListConflictsResponse {
+  repeated Conflict conflicts = 1;
+  uint32 total = 2;
+}
+
+message ResolveConflictRequest {
+  string conflict_id = 1;
+  ResolutionStrategy strategy = 2;
+  string manual_content = 3;
+}
+
+message ResolveConflictResponse {
+  Conflict conflict = 1;
+  MemoryRecord resolved_record = 2;
+}
+
+message SetPolicyRequest {
+  Scope scope = 1;
+  ResolutionStrategy default_strategy = 2;
+  float auto_merge_threshold = 3;
+}
+
+message SetPolicyResponse {
+  bool success = 1;
+}
+
+// === Conflict Service ===
+
+service ConflictService {
+  rpc ListConflicts(ListConflictsRequest) returns (ListConflictsResponse);
+  rpc ResolveConflict(ResolveConflictRequest) returns (ResolveConflictResponse);
+  rpc SetPolicy(SetPolicyRequest) returns (SetPolicyResponse);
+}

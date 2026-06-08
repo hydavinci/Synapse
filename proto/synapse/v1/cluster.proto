@@ -1,0 +1,90 @@
+syntax = "proto3";
+package synapse.v1;
+
+import "google/protobuf/timestamp.proto";
+import "synapse/v1/memory.proto";
+
+// === Cluster Types ===
+
+enum NodeState {
+  NODE_STATE_UNSPECIFIED = 0;
+  JOINING = 1;
+  ACTIVE = 2;
+  LEAVING = 3;
+  DOWN = 4;
+}
+
+enum ConsistencyLevel {
+  EVENTUAL = 0;
+  BOUNDED_STALENESS = 1;
+  STRONG = 2;
+}
+
+message Node {
+  string id = 1;
+  string address = 2;
+  NodeState state = 3;
+  google.protobuf.Timestamp last_heartbeat = 4;
+  VectorClock clock = 5;
+}
+
+message ClusterStatus {
+  repeated Node nodes = 1;
+  ConsistencyLevel consistency = 2;
+  uint64 total_records = 3;
+  uint64 pending_syncs = 4;
+  uint64 active_conflicts = 5;
+}
+
+// === Sync Events ===
+
+message SyncEvent {
+  string source_node = 1;
+  MemoryRecord record = 2;
+  google.protobuf.Timestamp timestamp = 3;
+  SyncAction action = 4;
+}
+
+enum SyncAction {
+  SYNC_ACTION_UNSPECIFIED = 0;
+  SYNC_ADD = 1;
+  SYNC_UPDATE = 2;
+  SYNC_DELETE = 3;
+}
+
+// === Cluster Service Requests/Responses ===
+
+message JoinRequest {
+  string node_id = 1;
+  string address = 2;
+}
+
+message JoinResponse {
+  bool accepted = 1;
+  ClusterStatus cluster_status = 2;
+}
+
+message LeaveRequest {
+  string node_id = 1;
+  bool graceful = 2;
+}
+
+message LeaveResponse {
+  bool acknowledged = 1;
+}
+
+message StatusRequest {}
+
+message SyncRequest {
+  string node_id = 1;
+  VectorClock from_clock = 2;
+}
+
+// === Cluster Service ===
+
+service ClusterService {
+  rpc Join(JoinRequest) returns (JoinResponse);
+  rpc Leave(LeaveRequest) returns (LeaveResponse);
+  rpc Status(StatusRequest) returns (ClusterStatus);
+  rpc Sync(SyncRequest) returns (stream SyncEvent);
+}

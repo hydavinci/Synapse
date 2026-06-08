@@ -1,0 +1,219 @@
+# ============================================================================
+# Synapse Memory Protocol — Default Configuration
+# ============================================================================
+# Configuration can be overridden via:
+#   1. Environment variables (SYNAPSE_ prefix, e.g., SYNAPSE_SERVER_PORT=9091)
+#   2. CLI flags (--server.port=9091)
+#   3. Config file path (--config /path/to/config.toml)
+#
+# Precedence: CLI flags > Env vars > Config file > Defaults
+# ============================================================================
+
+[server]
+# The address the server binds to
+host = "0.0.0.0"
+# gRPC port (primary protocol)
+port = 9090
+# HTTP/REST port (gateway + health endpoint)
+http_port = 9091
+# Maximum concurrent connections
+max_connections = 1024
+# Request timeout in milliseconds
+request_timeout_ms = 30000
+# Maximum message size in bytes (16 MB)
+max_message_size = 16777216
+# Enable gRPC reflection (useful for debugging with grpcurl)
+grpc_reflection = true
+
+[server.tls]
+# Enable TLS for gRPC and HTTP
+enabled = false
+# Path to TLS certificate
+cert_path = ""
+# Path to TLS private key
+key_path = ""
+# Path to CA certificate (for mTLS)
+ca_path = ""
+
+# ─── Cluster Configuration ──────────────────────────────────────────────────
+
+[cluster]
+# Unique node identifier (auto-generated if empty)
+node_id = ""
+# Comma-separated list of peer addresses for cluster discovery
+peers = []
+# Whether this node is a seed node (first to start)
+is_seed = false
+# Heartbeat interval between nodes in milliseconds
+heartbeat_interval_ms = 5000
+# Node considered dead after N missed heartbeats
+failure_threshold = 3
+# Anti-entropy sync interval in seconds
+sync_interval_s = 30
+# Maximum records per sync batch
+sync_batch_size = 1000
+
+[cluster.consistency]
+# Default consistency level: "eventual", "bounded_staleness", "strong"
+default = "eventual"
+# For bounded_staleness: maximum allowed staleness in milliseconds
+bounded_staleness_ms = 5000
+# Quorum size for strong consistency (0 = majority of nodes)
+quorum_size = 0
+
+# ─── Storage Configuration ───────────────────────────────────────────────────
+
+[storage]
+# Data directory for local persistence
+data_dir = "/opt/synapse/data"
+# Storage engine: "rocksdb" | "sled" | "sqlite"
+engine = "rocksdb"
+# Write-ahead log settings
+wal_enabled = true
+wal_sync_mode = "async" # "sync" for fsync on every write, "async" for batched
+
+[storage.compaction]
+# Enable automatic memory compaction
+enabled = true
+# Run compaction every N hours
+interval_hours = 24
+# Merge memories with similarity above this threshold
+merge_threshold = 0.95
+# Summarize episode clusters older than N days
+summarize_after_days = 30
+# Decay: reduce confidence of unaccessed memories after N days
+decay_after_days = 90
+# Minimum confidence before a memory is eligible for expiration
+min_confidence = 0.1
+
+# ─── Vector Index Configuration ──────────────────────────────────────────────
+
+[vector]
+# Backend: "qdrant" | "milvus" | "pgvector" | "embedded"
+backend = "embedded"
+# Qdrant/Milvus connection URL (when using external backend)
+url = ""
+# Collection/index name
+collection = "synapse_memories"
+# Vector dimensions (must match embedding model output)
+dimensions = 384
+# Distance metric: "cosine" | "euclidean" | "dot"
+distance = "cosine"
+# HNSW index parameters
+hnsw_m = 16
+hnsw_ef_construct = 128
+
+# ─── Embedding Configuration ─────────────────────────────────────────────────
+
+[embedding]
+# Embedding model to use
+# Local models: "all-MiniLM-L6-v2", "bge-small-en-v1.5", "nomic-embed-text-v1"
+# Remote: "openai:text-embedding-3-small", "cohere:embed-english-v3.0"
+model = "all-MiniLM-L6-v2"
+# Batch size for embedding generation
+batch_size = 32
+# Cache embeddings to avoid recomputation
+cache_enabled = true
+# Maximum cache size in MB
+cache_size_mb = 512
+
+[embedding.remote]
+# API key for remote embedding services (can also use SYNAPSE_EMBEDDING_API_KEY env var)
+api_key = ""
+# API base URL override
+base_url = ""
+# Timeout for remote embedding calls in milliseconds
+timeout_ms = 10000
+
+# ─── Conflict Resolution ─────────────────────────────────────────────────────
+
+[conflict]
+# Default resolution policy: "auto_merge" | "last_writer_wins" | "detect_and_queue" | "confidence_wins"
+default_policy = "detect_and_queue"
+# Semantic similarity threshold to consider two memories as conflicting
+detection_threshold = 0.85
+# Maximum pending conflicts before alerting
+max_pending = 100
+
+[conflict.llm_merge]
+# LLM provider for auto-merge: "openai" | "anthropic" | "local"
+provider = "openai"
+# Model to use for conflict resolution
+model = "gpt-4o-mini"
+# API key (can also use SYNAPSE_LLM_API_KEY env var)
+api_key = ""
+# Maximum tokens for merge reasoning
+max_tokens = 1000
+
+# ─── Memory Lifecycle ─────────────────────────────────────────────────────────
+
+[lifecycle]
+# Default TTL for memories in days (0 = no expiry)
+default_ttl_days = 0
+# Enable automatic kind classification for memories without explicit kind
+auto_classify = true
+# Deduplication defaults
+dedup_enabled = true
+dedup_threshold = 0.92
+
+[lifecycle.tiers]
+# Hot tier: frequently accessed memories (in-memory cache)
+hot_max_records = 10000
+hot_promotion_threshold = 5  # Access count to promote to hot
+# Cold tier: archive after N days without access
+cold_after_days = 180
+# Cold storage backend: "local" | "s3" | "gcs"
+cold_backend = "local"
+cold_path = "/opt/synapse/data/cold"
+
+# ─── Authentication & Authorization ──────────────────────────────────────────
+
+[auth]
+# Enable authentication
+enabled = false
+# Auth method: "token" | "jwt" | "mtls"
+method = "token"
+# Static API tokens (for development; use a secrets manager in production)
+# Format: "token:agent_id:roles"
+tokens = []
+# JWT settings
+jwt_issuer = ""
+jwt_audience = ""
+jwt_public_key_path = ""
+
+[auth.acl]
+# Default policy when no ACL matches: "deny" | "allow_read" | "allow_all"
+default_policy = "allow_all"
+# ACL rules (evaluated in order, first match wins)
+# Example: { scope = "org:acme/*", permissions = ["read", "write"] }
+rules = []
+
+# ─── MCP Server ───────────────────────────────────────────────────────────────
+
+[mcp]
+# Enable MCP (Model Context Protocol) tool server
+enabled = true
+# MCP transport: "stdio" | "http_sse"
+transport = "http_sse"
+# MCP HTTP port (only for http_sse transport)
+port = 9092
+# Default scope for MCP operations (if not specified in tool call)
+default_scope = ""
+# Maximum results returned by memory_recall tool
+max_recall_results = 10
+
+# ─── Observability ────────────────────────────────────────────────────────────
+
+[telemetry]
+# Log level: "trace" | "debug" | "info" | "warn" | "error"
+log_level = "info"
+# Log format: "json" | "pretty" | "compact"
+log_format = "json"
+# Enable OpenTelemetry tracing
+otel_enabled = false
+otel_endpoint = "http://localhost:4317"
+# Enable Prometheus metrics endpoint at /metrics
+metrics_enabled = true
+metrics_port = 9093
+# Enable request/response logging (verbose, disable in production)
+request_logging = false

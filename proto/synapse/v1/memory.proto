@@ -1,0 +1,250 @@
+syntax = "proto3";
+package synapse.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// === Core Types ===
+
+message MemoryRecord {
+  string id = 1;
+  string content = 2;
+  repeated float embedding = 3;
+
+  Scope scope = 4;
+  repeated string tags = 5;
+  MemoryKind kind = 6;
+  float confidence = 7;
+  Source source = 8;
+
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp updated_at = 11;
+  google.protobuf.Timestamp accessed_at = 12;
+  google.protobuf.Timestamp expires_at = 13;
+
+  uint64 version = 20;
+  VectorClock vector_clock = 21;
+  repeated string lineage = 22;
+}
+
+message Scope {
+  string org = 1;
+  string team = 2;
+  string agent = 3;
+  string user = 4;
+  string session = 5;
+  Visibility visibility = 6;
+}
+
+enum Visibility {
+  VISIBILITY_UNSPECIFIED = 0;
+  PRIVATE = 1;
+  SCOPE_UP = 2;
+  SCOPE_DOWN = 3;
+  SHARED = 4;
+  PUBLIC = 5;
+}
+
+enum MemoryKind {
+  KIND_UNSPECIFIED = 0;
+  FACT = 1;
+  PREFERENCE = 2;
+  EPISODE = 3;
+  RULE = 4;
+  RELATION = 5;
+  CORRECTION = 6;
+  SUMMARY = 7;
+}
+
+message Source {
+  string agent_id = 1;
+  string session_id = 2;
+  string input_hash = 3;
+  string tool_call_id = 4;
+}
+
+message VectorClock {
+  map<string, uint64> clock = 1;
+}
+
+// === Time Range ===
+
+message TimeRange {
+  google.protobuf.Timestamp start = 1;
+  google.protobuf.Timestamp end = 2;
+}
+
+// === Conflict Policy ===
+
+enum ConflictPolicy {
+  CONFLICT_POLICY_UNSPECIFIED = 0;
+  DETECT_AND_QUEUE = 1;
+  AUTO_MERGE = 2;
+  REJECT = 3;
+  FORCE = 4;
+}
+
+// === Event Types ===
+
+enum EventType {
+  EVENT_ALL = 0;
+  MEMORY_ADDED = 1;
+  MEMORY_UPDATED = 2;
+  MEMORY_FORGOTTEN = 3;
+  CONFLICT_DETECTED = 4;
+  CONFLICT_RESOLVED = 5;
+  MEMORY_EXPIRED = 6;
+}
+
+message MemoryEvent {
+  EventType type = 1;
+  MemoryRecord record = 2;
+  string conflict_id = 3;
+  google.protobuf.Timestamp timestamp = 4;
+  string source_node = 5;
+}
+
+// === Search ===
+
+enum SearchMode {
+  SEMANTIC = 0;
+  KEYWORD = 1;
+  HYBRID = 2;
+  GRAPH = 3;
+}
+
+message SearchResult {
+  MemoryRecord record = 1;
+  float score = 2;
+  string explanation = 3;
+}
+
+// === Service Requests/Responses ===
+
+message AddRequest {
+  string content = 1;
+  Scope scope = 2;
+  repeated string tags = 3;
+  MemoryKind kind = 4;
+  float confidence = 5;
+  google.protobuf.Timestamp expires_at = 6;
+  bool deduplicate = 10;
+  float dedup_threshold = 11;
+  ConflictPolicy on_conflict = 12;
+}
+
+message AddResponse {
+  MemoryRecord record = 1;
+  bool deduplicated = 2;
+  string merged_with = 3;
+}
+
+message UpdateRequest {
+  string id = 1;
+  string content = 2;
+  repeated string tags = 3;
+  MemoryKind kind = 4;
+  float confidence = 5;
+  google.protobuf.Timestamp expires_at = 6;
+}
+
+message UpdateResponse {
+  MemoryRecord record = 1;
+}
+
+message ForgetRequest {
+  string id = 1;
+  Scope scope = 2;
+  google.protobuf.Timestamp before = 3;
+  string reason = 4;
+}
+
+message ForgetResponse {
+  uint64 forgotten_count = 1;
+}
+
+message GetRequest {
+  string id = 1;
+}
+
+message GetResponse {
+  MemoryRecord record = 1;
+}
+
+message SearchRequest {
+  string query = 1;
+  Scope scope = 2;
+  uint32 top_k = 3;
+  float min_score = 4;
+  repeated MemoryKind kinds = 5;
+  repeated string tags = 6;
+  TimeRange time_range = 7;
+  string agent_id = 8;
+  bool include_expired = 10;
+  bool rerank = 11;
+  SearchMode mode = 12;
+  repeated float query_embedding = 13;
+}
+
+message SearchResponse {
+  repeated SearchResult results = 1;
+  uint32 total = 2;
+}
+
+message ListRequest {
+  Scope scope = 1;
+  uint32 limit = 2;
+  uint32 offset = 3;
+  repeated MemoryKind kinds = 4;
+  repeated string tags = 5;
+}
+
+message ListResponse {
+  repeated MemoryRecord records = 1;
+  uint32 total = 2;
+}
+
+message HistoryRequest {
+  string id = 1;
+}
+
+message HistoryResponse {
+  repeated MemoryRecord versions = 1;
+}
+
+message SubscribeRequest {
+  Scope scope = 1;
+  repeated EventType event_types = 2;
+}
+
+message BatchAddRequest {
+  repeated AddRequest records = 1;
+}
+
+message BatchAddResponse {
+  repeated AddResponse results = 1;
+}
+
+message ExportRequest {
+  Scope scope = 1;
+}
+
+message ImportResponse {
+  uint64 imported_count = 1;
+  uint64 skipped_count = 2;
+}
+
+// === Memory Service ===
+
+service MemoryService {
+  rpc Add(AddRequest) returns (AddResponse);
+  rpc Update(UpdateRequest) returns (UpdateResponse);
+  rpc Forget(ForgetRequest) returns (ForgetResponse);
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc List(ListRequest) returns (ListResponse);
+  rpc History(HistoryRequest) returns (HistoryResponse);
+  rpc Subscribe(SubscribeRequest) returns (stream MemoryEvent);
+  rpc BatchAdd(BatchAddRequest) returns (BatchAddResponse);
+  rpc Export(ExportRequest) returns (stream MemoryRecord);
+  rpc Import(stream MemoryRecord) returns (ImportResponse);
+}
