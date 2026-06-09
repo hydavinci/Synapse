@@ -12,6 +12,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -141,7 +142,8 @@ class LocalStore:
     ) -> MemoryRecord:
         """Store a new memory record."""
         record_id = str(uuid.uuid4())
-        now = time.time()
+        now_ts = time.time()
+        now = datetime.fromtimestamp(now_ts, tz=timezone.utc)
         scope = scope or Scope()
         kind = kind or MemoryKind.FACT
         tags = tags or []
@@ -174,9 +176,9 @@ class LocalStore:
                     json.dumps(tags),
                     "",
                     1,
-                    now,
-                    now,
-                    now,
+                    now_ts,
+                    now_ts,
+                    now_ts,
                     None,
                     json.dumps(metadata or {}),
                 ),
@@ -226,7 +228,8 @@ class LocalStore:
                 (record_id, existing.version, existing.content, existing.updated_at),
             )
 
-            now = time.time()
+            now_ts = time.time()
+            now = datetime.fromtimestamp(now_ts, tz=timezone.utc)
             new_content = content if content is not None else existing.content
             new_tags = tags if tags is not None else existing.tags
             new_kind = kind if kind is not None else existing.kind
@@ -244,14 +247,14 @@ class LocalStore:
                     """UPDATE memories SET content=?, embedding=?, tags=?, kind=?,
                        confidence=?, version=?, updated_at=? WHERE id=?""",
                     (new_content, embedding_blob, json.dumps(new_tags), new_kind.value,
-                     new_confidence, new_version, now, record_id),
+                     new_confidence, new_version, now_ts, record_id),
                 )
             else:
                 self._conn.execute(
                     """UPDATE memories SET content=?, tags=?, kind=?,
                        confidence=?, version=?, updated_at=? WHERE id=?""",
                     (new_content, json.dumps(new_tags), new_kind.value,
-                     new_confidence, new_version, now, record_id),
+                     new_confidence, new_version, now_ts, record_id),
                 )
             self._conn.commit()
 
@@ -562,14 +565,14 @@ class LocalStore:
                 team=row["scope_team"] or None,
                 user=row["scope_user"] or None,
                 agent=row["scope_agent"] or None,
-                visibility=Visibility(row["scope_visibility"]) if row["scope_visibility"] else None,
+                visibility=Visibility(row["scope_visibility"]) if row["scope_visibility"] else Visibility.PRIVATE,
             ),
             kind=MemoryKind(row["kind"]),
             confidence=row["confidence"],
             tags=json.loads(row["tags"]),
             version=row["version"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
+            created_at=datetime.fromtimestamp(row["created_at"], tz=timezone.utc) if row["created_at"] else None,
+            updated_at=datetime.fromtimestamp(row["updated_at"], tz=timezone.utc) if row["updated_at"] else None,
         )
 
     @staticmethod

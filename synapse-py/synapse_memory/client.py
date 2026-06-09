@@ -383,7 +383,8 @@ class SynapseClient:
         # For v0.1, gRPC transport requires compiled proto stubs.
         # If stubs aren't available, we raise a clear error.
         try:
-            from . import _grpc_stubs as stubs  # type: ignore
+            from . import _grpc_stubs
+            stubs: Any = _grpc_stubs
         except ImportError:
             # Fall back to REST if gRPC stubs not compiled
             logger.warning("gRPC stubs not compiled. Falling back to REST for this request.")
