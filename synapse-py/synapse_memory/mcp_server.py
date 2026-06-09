@@ -216,6 +216,7 @@ class SynapseMCPServer:
             # else: "none" — no embeddings, keyword search only
 
             self._store = LocalStore(db_path=self._db_path, embedding_fn=embedding_fn)
+            self._store.start_cleanup_scheduler(interval_seconds=3600)
         return self._store
 
     async def _get_remote_client(self):

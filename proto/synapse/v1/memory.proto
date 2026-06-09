@@ -108,8 +108,8 @@ message MemoryEvent {
 enum SearchMode {
   SEMANTIC = 0;
   KEYWORD = 1;
-  HYBRID = 2;
-  GRAPH = 3;
+  HYBRID = 2;    // NOT YET IMPLEMENTED — falls back to SEMANTIC
+  GRAPH = 3;     // NOT YET IMPLEMENTED — reserved for future graph-based retrieval
 }
 
 message SearchResult {

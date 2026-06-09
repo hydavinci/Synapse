@@ -17,6 +17,9 @@ pub struct Config {
     #[serde(default)]
     pub conflict: ConflictConfig,
 
+    #[serde(default)]
+    pub rate_limit: RateLimitSettings,
+
     /// Authentication token. Also overridable via SYNAPSE_AUTH_TOKEN env var.
     #[serde(default)]
     pub auth_token: Option<String>,
@@ -77,11 +80,16 @@ pub struct ClusterConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct StorageConfig {
+    /// Backend type: "memory" or "sqlite"
     #[serde(default = "default_backend")]
     pub backend: String,
 
     #[serde(default = "default_max_records")]
     pub max_records: u64,
+
+    /// Path for sqlite database file (only used when backend="sqlite")
+    #[serde(default = "default_sqlite_path")]
+    pub sqlite_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -128,11 +136,17 @@ fn default_consistency() -> String {
 }
 
 fn default_backend() -> String {
-    "memory".to_string()
+    std::env::var("SYNAPSE_BACKEND").unwrap_or_else(|_| "sqlite".to_string())
 }
 
 fn default_max_records() -> u64 {
     1_000_000
+}
+
+fn default_sqlite_path() -> PathBuf {
+    std::env::var("SYNAPSE_SQLITE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("data/synapse.db"))
 }
 
 fn default_similarity_threshold() -> f32 {
@@ -161,6 +175,7 @@ impl Default for Config {
             cluster: ClusterConfig::default(),
             storage: StorageConfig::default(),
             conflict: ConflictConfig::default(),
+            rate_limit: RateLimitSettings::default(),
             auth_token: None,
             cluster_secret: None,
             max_content_bytes: default_max_content_bytes(),
@@ -185,6 +200,7 @@ impl Default for StorageConfig {
         Self {
             backend: default_backend(),
             max_records: default_max_records(),
+            sqlite_path: default_sqlite_path(),
         }
     }
 }
@@ -196,6 +212,45 @@ impl Default for ConflictConfig {
             default_strategy: default_resolution_strategy(),
         }
     }
+}
+
+/// Per-scope rate limit settings.
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct RateLimitSettings {
+    /// Max requests per window per scope (default: 100)
+    #[serde(default = "default_rate_max_requests")]
+    pub max_requests: u32,
+    /// Window duration in seconds (default: 60)
+    #[serde(default = "default_rate_window_secs")]
+    pub window_secs: u64,
+    /// Max tracked scopes (default: 10_000)
+    #[serde(default = "default_rate_max_scopes")]
+    pub max_scopes: usize,
+    /// Disable rate limiting entirely (default: false)
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+impl Default for RateLimitSettings {
+    fn default() -> Self {
+        Self {
+            max_requests: default_rate_max_requests(),
+            window_secs: default_rate_window_secs(),
+            max_scopes: default_rate_max_scopes(),
+            disabled: false,
+        }
+    }
+}
+
+fn default_rate_max_requests() -> u32 {
+    100
+}
+fn default_rate_window_secs() -> u64 {
+    60
+}
+fn default_rate_max_scopes() -> usize {
+    10_000
 }
 
 impl Config {

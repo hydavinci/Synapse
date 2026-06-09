@@ -32,9 +32,16 @@ impl Ord for ScoredItem {
 
 /// In-memory vector search using cosine similarity with top-K heap optimization.
 ///
-/// For v0.1 this scans all embeddings (brute-force). Performance characteristics:
+/// Performance characteristics:
 /// - O(n) scan, O(n log k) for top-k extraction via min-heap
-/// - Suitable for < 100k records. Beyond that, add HNSW index.
+/// - Uses pre-computed query magnitude to avoid redundant sqrt
+/// - Suitable for < 100k records. Beyond that, integrate an HNSW index.
+///
+/// ## Upgrade path for >100k records:
+/// 1. Add `hnswlib-rs` or `usearch` crate dependency
+/// 2. Build HNSW graph from `get_all_embeddings()` on startup
+/// 3. Maintain incremental insertions via `add_point()`
+/// 4. Switch `search()` to use ANN query when corpus exceeds threshold
 pub struct VectorSearch {
     store: Arc<dyn StorageBackend>,
 }

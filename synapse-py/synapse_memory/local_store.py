@@ -77,6 +77,8 @@ class LocalStore:
                 id TEXT,
                 version INTEGER,
                 content TEXT NOT NULL,
+                tags TEXT DEFAULT '[]',
+                kind TEXT DEFAULT 'fact',
                 updated_at REAL NOT NULL,
                 PRIMARY KEY (id, version)
             );
@@ -224,8 +226,10 @@ class LocalStore:
         # Save to history
         with self._lock:
             self._conn.execute(
-                "INSERT OR REPLACE INTO memory_history (id, version, content, updated_at) VALUES (?, ?, ?, ?)",
-                (record_id, existing.version, existing.content, existing.updated_at),
+                "INSERT OR REPLACE INTO memory_history (id, version, content, tags, kind, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (record_id, existing.version, existing.content,
+                 json.dumps(existing.tags), existing.kind.value,
+                 existing.updated_at.timestamp() if existing.updated_at else time.time()),
             )
 
             now_ts = time.time()
@@ -391,8 +395,8 @@ class LocalStore:
     ) -> list[SearchResult]:
         """Cosine similarity search over stored embeddings.
 
-        CVE-8 fix: Processes embeddings in batches to avoid loading all into memory at once.
-        Uses streaming cursor with batch_size=1000.
+        Optimized: only loads id+embedding for scoring, then batch-fetches full records
+        for top-K hits. Processes in batches to avoid OOM on large corpora.
         """
         import numpy as np
 
@@ -402,14 +406,14 @@ class LocalStore:
             return []
         query_vec = query_vec / query_norm
 
-        # Use batched fetching to avoid OOM on large corpora
+        # Phase 1: Score only id + embedding (lightweight)
         BATCH_SIZE = 1000
         cursor = self._conn.execute(
-            f"SELECT * FROM memories WHERE {where} AND embedding IS NOT NULL",
+            f"SELECT id, embedding FROM memories WHERE {where} AND embedding IS NOT NULL",
             params,
         )
 
-        scored: list[tuple[float, sqlite3.Row]] = []
+        scored: list[tuple[float, str]] = []
         while True:
             rows = cursor.fetchmany(BATCH_SIZE)
             if not rows:
@@ -428,27 +432,47 @@ class LocalStore:
                 score = float(np.dot(query_vec, stored_vec / stored_norm))
 
                 if score >= min_score:
-                    # Tag filter
-                    if tags:
-                        record_tags = json.loads(row["tags"])
-                        if not all(t in record_tags for t in tags):
-                            continue
+                    if len(scored) < top_k * 3:  # Over-fetch for tag filtering
+                        scored.append((score, row["id"]))
+                    elif score > scored[-1][0]:
+                        scored.append((score, row["id"]))
+                        scored.sort(key=lambda x: x[0], reverse=True)
+                        scored = scored[:top_k * 3]
 
-                    # Keep only top_k best scores (min-heap emulation)
-                    if len(scored) < top_k:
-                        scored.append((score, row))
-                    elif score > scored[0][0]:
-                        # Replace lowest score
-                        scored[0] = (score, row)
-                        scored.sort(key=lambda x: x[0])  # Re-sort to keep min at [0]
-
-        # Sort by score descending for output
+        # Sort candidates by score
         scored.sort(key=lambda x: x[0], reverse=True)
 
+        # Phase 2: Batch-fetch full records for candidates
+        candidate_ids = [rid for _, rid in scored]
+        if not candidate_ids:
+            return []
+
+        placeholders = ",".join("?" * len(candidate_ids))
+        full_rows = self._conn.execute(
+            f"SELECT * FROM memories WHERE id IN ({placeholders})",
+            candidate_ids,
+        ).fetchall()
+
+        # Build id->row map
+        row_map = {row["id"]: row for row in full_rows}
+
+        # Phase 3: Apply tag filter and build results
         results = []
-        for score, row in scored[:top_k]:
+        for score, rid in scored:
+            if rid not in row_map:
+                continue
+            row = row_map[rid]
+
+            # Tag filter
+            if tags:
+                record_tags = json.loads(row["tags"])
+                if not all(t in record_tags for t in tags):
+                    continue
+
             record = self._row_to_record(row)
             results.append(SearchResult(record=record, score=score))
+            if len(results) >= top_k:
+                break
 
         return results
 
@@ -581,16 +605,47 @@ class LocalStore:
         import numpy as np
         return np.array(embedding, dtype=np.float32).tobytes()
 
+    def start_cleanup_scheduler(self, interval_seconds: int = 3600) -> None:
+        """Start a background thread that periodically cleans up expired memories.
+
+        Args:
+            interval_seconds: How often to run cleanup (default: 1 hour)
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        def _cleanup_loop():
+            while not self._cleanup_stop_event.is_set():
+                self._cleanup_stop_event.wait(interval_seconds)
+                if self._cleanup_stop_event.is_set():
+                    break
+                try:
+                    deleted = self.cleanup_expired()
+                    if deleted > 0:
+                        logger.info("Cleaned up %d expired memories", deleted)
+                except Exception as e:
+                    logger.warning("Cleanup failed: %s", e)
+
+        self._cleanup_stop_event = threading.Event()
+        self._cleanup_thread = threading.Thread(
+            target=_cleanup_loop, daemon=True, name="synapse-cleanup"
+        )
+        self._cleanup_thread.start()
+
     def close(self) -> None:
-        """Close the database connection."""
+        """Close the database connection and stop background tasks."""
+        if hasattr(self, '_cleanup_stop_event'):
+            self._cleanup_stop_event.set()
+            self._cleanup_thread.join(timeout=2)
         self._conn.close()
 
     def cleanup_expired(self) -> int:
         """Remove expired memories (where expires_at < now). Returns count deleted."""
         now = time.time()
-        cursor = self._conn.execute(
-            "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?",
-            (now,),
-        )
-        self._conn.commit()
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?",
+                (now,),
+            )
+            self._conn.commit()
         return cursor.rowcount

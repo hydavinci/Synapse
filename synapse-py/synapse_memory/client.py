@@ -376,39 +376,76 @@ class SynapseClient:
     ) -> dict[str, Any]:
         """Make a gRPC call mapped from the REST-like interface.
 
-        NOTE: In production you'd import the generated pb2/pb2_grpc stubs and call
-        typed methods. This mapping layer allows the same high-level API to work
-        over either transport.
+        NOTE: gRPC transport requires compiled proto stubs (synapse_pb2/synapse_pb2_grpc).
+        If stubs are not available, automatically falls back to REST transport.
+        To compile stubs: `python -m grpc_tools.protoc -I proto --python_out=... --grpc_python_out=... proto/synapse/v1/*.proto`
         """
-        # For v0.1, gRPC transport requires compiled proto stubs.
-        # If stubs aren't available, we raise a clear error.
+        # Check if compiled gRPC stubs are available
         try:
-            from . import _grpc_stubs
-            stubs: Any = _grpc_stubs
+            from ._grpc_stubs import memory_pb2, memory_pb2_grpc  # type: ignore[import]
+            stubs_available = True
         except ImportError:
+            stubs_available = False
+
+        if not stubs_available:
             # Fall back to REST if gRPC stubs not compiled
-            logger.warning("gRPC stubs not compiled. Falling back to REST for this request.")
+            logger.info(
+                "gRPC stubs not compiled — falling back to REST. "
+                "See docs/getting-started.md for proto compilation instructions."
+            )
             self._active_transport = TransportMode.REST
             await self._connect_rest()
             return await self._rest_request(method, path, json=json, params=params)
 
-        # Route by path pattern (typed gRPC calls)
+        # Route by path pattern using compiled stubs
+        stub = memory_pb2_grpc.MemoryServiceStub(self._grpc_channel)
+
         if path == "/v1/memories" and method == "POST":
-            return await stubs.add(self._grpc_channel, json or {})
+            req = memory_pb2.AddRequest(**self._to_proto_fields(json or {}))
+            resp = await stub.Add(req)
+            return self._proto_to_dict(resp.record)
         elif path.startswith("/v1/memories/") and method == "GET":
             record_id = path.split("/")[-1]
-            return await stubs.get(self._grpc_channel, record_id)
+            req = memory_pb2.GetRequest(id=record_id)
+            resp = await stub.Get(req)
+            return self._proto_to_dict(resp.record)
         elif path == "/v1/memories/search" and method == "POST":
-            return await stubs.search(self._grpc_channel, json or {})
+            req = memory_pb2.SearchRequest(**self._to_proto_fields(json or {}))
+            resp = await stub.Search(req)
+            return {"results": [self._proto_to_dict(r) for r in resp.results]}
         elif path == "/v1/memories/forget" and method == "POST":
-            return await stubs.forget(self._grpc_channel, json or {})
+            req = memory_pb2.ForgetRequest(**self._to_proto_fields(json or {}))
+            resp = await stub.Forget(req)
+            return {"deleted_count": resp.deleted_count}
         elif path.startswith("/v1/memories/") and method == "PATCH":
             record_id = path.split("/")[-1]
-            return await stubs.update(self._grpc_channel, record_id, json or {})
+            fields = self._to_proto_fields(json or {})
+            fields["id"] = record_id
+            req = memory_pb2.UpdateRequest(**fields)
+            resp = await stub.Update(req)
+            return self._proto_to_dict(resp.record)
         elif path == "/v1/memories/batch" and method == "POST":
-            return await stubs.batch_add(self._grpc_channel, json or {})
+            records = json.get("records", []) if json else []  # type: ignore[union-attr]
+            req = memory_pb2.BatchAddRequest(
+                records=[memory_pb2.AddRequest(**self._to_proto_fields(r)) for r in records]
+            )
+            resp = await stub.BatchAdd(req)
+            return {"records": [self._proto_to_dict(r) for r in resp.records]}
         else:
             raise SynapseError(f"Unsupported gRPC route: {method} {path}")
+
+    @staticmethod
+    def _to_proto_fields(data: dict[str, Any]) -> dict[str, Any]:
+        """Convert REST-style JSON fields to proto-compatible field names."""
+        # Proto uses snake_case which matches our REST API, so mostly pass-through
+        # Filter out None values and convert enums
+        return {k: v for k, v in data.items() if v is not None}
+
+    @staticmethod
+    def _proto_to_dict(proto_obj: Any) -> dict[str, Any]:
+        """Convert a protobuf message to a dict for model validation."""
+        from google.protobuf.json_format import MessageToDict
+        return MessageToDict(proto_obj, preserving_proto_field_name=True)
 
     async def _rest_request(
         self,

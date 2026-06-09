@@ -23,6 +23,7 @@ use tower::limit::ConcurrencyLimitLayer;
 use tracing::info;
 
 mod auth;
+mod ratelimit;
 
 use api::grpc::{ClusterServiceImpl, ConflictServiceImpl, MemoryServiceImpl};
 use auth::AuthInterceptor;
@@ -33,7 +34,7 @@ use proto::cluster_service_server::ClusterServiceServer;
 use proto::conflict_service_server::ConflictServiceServer;
 use proto::memory_service_server::MemoryServiceServer;
 use search::VectorSearch;
-use storage::InMemoryStore;
+use storage::{InMemoryStore, SqliteStore};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -55,9 +56,21 @@ async fn main() -> anyhow::Result<()> {
     info!("Node ID: {}", config.cluster.node_id);
     info!("Listen address: {}", config.listen_addr());
 
-    // Initialize storage
-    let store: Arc<dyn storage::StorageBackend> = Arc::new(InMemoryStore::new());
-    info!("Storage backend: in-memory");
+    // Initialize storage based on config
+    let store: Arc<dyn storage::StorageBackend> = match config.storage.backend.as_str() {
+        "sqlite" => {
+            let path = config.storage.sqlite_path.clone();
+            info!("Storage backend: sqlite ({})", path.display());
+            Arc::new(SqliteStore::new(path)?)
+        }
+        "memory" => {
+            info!("Storage backend: in-memory (data will not persist across restarts)");
+            Arc::new(InMemoryStore::new())
+        }
+        other => {
+            anyhow::bail!("Unknown storage backend: '{}'. Supported: sqlite, memory", other);
+        }
+    };
 
     // Initialize search
     let search = Arc::new(VectorSearch::new(store.clone()));
@@ -104,12 +117,21 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Build gRPC services
+    let rate_limiter = Arc::new(ratelimit::ScopeRateLimiter::new(
+        ratelimit::RateLimitConfig {
+            max_requests: config.rate_limit.max_requests,
+            window: std::time::Duration::from_secs(config.rate_limit.window_secs),
+            max_scopes: config.rate_limit.max_scopes,
+        },
+    ));
+
     let memory_service = MemoryServiceImpl::new(
         store.clone(),
         search.clone(),
         conflict_detector.clone(),
         cluster.clone(),
         events_tx.clone(),
+        rate_limiter.clone(),
     );
 
     let conflict_service = ConflictServiceImpl::new(conflict_detector.clone(), store.clone());

@@ -31,6 +31,7 @@ def openai_embedding(
     """Create an OpenAI embedding function.
 
     Uses a persistent httpx client for connection pooling.
+    Thread-safe and async-safe (sync calls are safe from asyncio.to_thread).
 
     Args:
         model: OpenAI embedding model name

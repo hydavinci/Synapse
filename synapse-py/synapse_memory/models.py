@@ -44,12 +44,16 @@ class ConflictPolicy(str, Enum):
 
 
 class SearchMode(str, Enum):
-    """Search strategy."""
+    """Search strategy.
+
+    Note: GRAPH mode is reserved for future implementation.
+    Currently only SEMANTIC, KEYWORD, and HYBRID are supported.
+    """
 
     SEMANTIC = "semantic"
     KEYWORD = "keyword"
     HYBRID = "hybrid"
-    GRAPH = "graph"
+    GRAPH = "graph"  # NOT IMPLEMENTED — reserved for future graph-based retrieval
 
 
 class EventType(str, Enum):

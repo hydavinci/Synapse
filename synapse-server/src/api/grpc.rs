@@ -10,6 +10,7 @@ use tracing::{info, warn};
 use crate::cluster::ClusterNode;
 use crate::conflict::{ConflictDetector, ConflictResolver};
 use crate::proto;
+use crate::ratelimit::ScopeRateLimiter;
 use crate::scope::ScopeResolver;
 use crate::search::VectorSearch;
 use crate::storage::StorageBackend;
@@ -31,6 +32,7 @@ pub struct MemoryServiceImpl {
     conflict_detector: Arc<ConflictDetector>,
     cluster: Arc<ClusterNode>,
     events_tx: broadcast::Sender<proto::MemoryEvent>,
+    rate_limiter: Arc<ScopeRateLimiter>,
 }
 
 impl MemoryServiceImpl {
@@ -40,6 +42,7 @@ impl MemoryServiceImpl {
         conflict_detector: Arc<ConflictDetector>,
         cluster: Arc<ClusterNode>,
         events_tx: broadcast::Sender<proto::MemoryEvent>,
+        rate_limiter: Arc<ScopeRateLimiter>,
     ) -> Self {
         Self {
             store,
@@ -47,6 +50,7 @@ impl MemoryServiceImpl {
             conflict_detector,
             cluster,
             events_tx,
+            rate_limiter,
         }
     }
 
@@ -118,6 +122,19 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
             return Err(Status::invalid_argument(
                 "confidence must be between 0.0 and 1.0",
             ));
+        }
+
+        // === Per-scope rate limiting ===
+        let scope_key = req
+            .scope
+            .as_ref()
+            .map(|s| ScopeRateLimiter::scope_key(s))
+            .unwrap_or_else(|| "_:_:_:_".to_string());
+        if let Err(retry_after_ms) = self.rate_limiter.check(&scope_key).await {
+            return Err(Status::resource_exhausted(format!(
+                "Rate limit exceeded for scope. Retry after {}ms",
+                retry_after_ms
+            )));
         }
 
         // Generate ID and timestamps
