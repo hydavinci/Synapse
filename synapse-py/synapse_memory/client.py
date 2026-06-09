@@ -382,7 +382,7 @@ class SynapseClient:
         """
         # Check if compiled gRPC stubs are available
         try:
-            from ._grpc_stubs import memory_pb2, memory_pb2_grpc  # type: ignore[import]
+            from ._grpc_stubs import memory_pb2, memory_pb2_grpc  # type: ignore[attr-defined]
             stubs_available = True
         except ImportError:
             stubs_available = False

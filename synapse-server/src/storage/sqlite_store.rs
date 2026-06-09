@@ -94,14 +94,15 @@ impl SqliteStore {
         if secs == 0 && nanos == 0 {
             None
         } else {
-            Some(Timestamp { seconds: secs, nanos })
+            Some(Timestamp {
+                seconds: secs,
+                nanos,
+            })
         }
     }
 
     fn proto_to_ts(ts: &Option<Timestamp>) -> (i64, i32) {
-        ts.as_ref()
-            .map(|t| (t.seconds, t.nanos))
-            .unwrap_or((0, 0))
+        ts.as_ref().map(|t| (t.seconds, t.nanos)).unwrap_or((0, 0))
     }
 
     fn row_to_record(row: &rusqlite::Row) -> rusqlite::Result<proto::MemoryRecord> {
@@ -360,7 +361,8 @@ impl StorageBackend for SqliteStore {
 
         let where_clause = conditions.join(" AND ");
         let sql = format!("DELETE FROM memories WHERE {}", where_clause);
-        let params_ref: Vec<&dyn rusqlite::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let params_ref: Vec<&dyn rusqlite::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
         let rows = conn.execute(&sql, params_ref.as_slice())?;
 
         Ok(rows as u64)
@@ -410,7 +412,8 @@ impl StorageBackend for SqliteStore {
 
         // Count total
         let count_sql = format!("SELECT COUNT(*) FROM memories WHERE {}", where_clause);
-        let count_params: Vec<&dyn rusqlite::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let count_params: Vec<&dyn rusqlite::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
         let total: u32 = conn.query_row(&count_sql, count_params.as_slice(), |row| row.get(0))?;
 
         // Fetch page
@@ -420,7 +423,8 @@ impl StorageBackend for SqliteStore {
         );
         param_values.push(Box::new(limit));
         param_values.push(Box::new(offset));
-        let params_ref: Vec<&dyn rusqlite::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let params_ref: Vec<&dyn rusqlite::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt
@@ -490,7 +494,8 @@ impl StorageBackend for SqliteStore {
 
     async fn get_all_embeddings(&self) -> Result<Vec<(String, Vec<f32>)>> {
         let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare("SELECT id, embedding FROM memories WHERE embedding IS NOT NULL")?;
+        let mut stmt =
+            conn.prepare("SELECT id, embedding FROM memories WHERE embedding IS NOT NULL")?;
         let results = stmt
             .query_map([], |row| {
                 let id: String = row.get(0)?;
@@ -516,7 +521,8 @@ impl StorageBackend for SqliteStore {
             "SELECT * FROM memories WHERE id IN ({})",
             placeholders.join(",")
         );
-        let params: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        let params: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
         let mut stmt = conn.prepare(&sql)?;
         let results = stmt
             .query_map(params.as_slice(), Self::row_to_record)?

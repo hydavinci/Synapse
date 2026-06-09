@@ -68,7 +68,10 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(InMemoryStore::new())
         }
         other => {
-            anyhow::bail!("Unknown storage backend: '{}'. Supported: sqlite, memory", other);
+            anyhow::bail!(
+                "Unknown storage backend: '{}'. Supported: sqlite, memory",
+                other
+            );
         }
     };
 

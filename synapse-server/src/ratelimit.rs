@@ -68,9 +68,9 @@ impl ScopeRateLimiter {
 
         // Periodic cleanup of stale entries (every 5 minutes)
         if now.duration_since(state.last_cleanup) > Duration::from_secs(300) {
-            state.windows.retain(|_, entry| {
-                now.duration_since(entry.window_start) < self.config.window * 2
-            });
+            state
+                .windows
+                .retain(|_, entry| now.duration_since(entry.window_start) < self.config.window * 2);
             state.last_cleanup = now;
         }
 
@@ -84,12 +84,13 @@ impl ScopeRateLimiter {
             return Err(self.config.window.as_millis() as u64);
         }
 
-        let entry = state.windows.entry(scope_key.to_string()).or_insert_with(|| {
-            WindowEntry {
+        let entry = state
+            .windows
+            .entry(scope_key.to_string())
+            .or_insert_with(|| WindowEntry {
                 count: 0,
                 window_start: now,
-            }
-        });
+            });
 
         // Check if window expired → reset
         if now.duration_since(entry.window_start) >= self.config.window {
@@ -113,10 +114,26 @@ impl ScopeRateLimiter {
     pub fn scope_key(scope: &crate::proto::Scope) -> String {
         format!(
             "{}:{}:{}:{}",
-            if scope.org.is_empty() { "_" } else { &scope.org },
-            if scope.team.is_empty() { "_" } else { &scope.team },
-            if scope.agent.is_empty() { "_" } else { &scope.agent },
-            if scope.user.is_empty() { "_" } else { &scope.user },
+            if scope.org.is_empty() {
+                "_"
+            } else {
+                &scope.org
+            },
+            if scope.team.is_empty() {
+                "_"
+            } else {
+                &scope.team
+            },
+            if scope.agent.is_empty() {
+                "_"
+            } else {
+                &scope.agent
+            },
+            if scope.user.is_empty() {
+                "_"
+            } else {
+                &scope.user
+            },
         )
     }
 }

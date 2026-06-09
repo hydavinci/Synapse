@@ -128,7 +128,7 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
         let scope_key = req
             .scope
             .as_ref()
-            .map(|s| ScopeRateLimiter::scope_key(s))
+            .map(ScopeRateLimiter::scope_key)
             .unwrap_or_else(|| "_:_:_:_".to_string());
         if let Err(retry_after_ms) = self.rate_limiter.check(&scope_key).await {
             return Err(Status::resource_exhausted(format!(
