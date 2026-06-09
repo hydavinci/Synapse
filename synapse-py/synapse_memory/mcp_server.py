@@ -27,9 +27,9 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
-from mcp.server import Server
-from mcp.server.stdio import run_server
-from mcp.types import TextContent, Tool
+from mcp.server import Server, InitializationOptions
+from mcp.server.stdio import stdio_server
+from mcp.types import TextContent, Tool, ServerCapabilities, ToolsCapability
 
 from .models import MemoryKind, Scope, SearchResult, Visibility
 from .scope import parse_scope
@@ -492,8 +492,21 @@ class SynapseMCPServer:
             db = self._db_path or Path.home() / ".synapse" / "memories.db"
             logger.info("Database: %s", db)
 
+        init_options = InitializationOptions(
+            server_name="synapse-memory",
+            server_version="0.1.0",
+            capabilities=ServerCapabilities(
+                tools=ToolsCapability(),
+            ),
+        )
+
         try:
-            await run_server(self._server)
+            async with stdio_server() as (read_stream, write_stream):
+                await self._server.run(
+                    read_stream,
+                    write_stream,
+                    init_options,
+                )
         finally:
             if self._store:
                 self._store.close()
