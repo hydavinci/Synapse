@@ -46,7 +46,8 @@ RUN apt-get update && apt-get install -y \
     && groupadd -r synapse && useradd -r -g synapse -d /opt/synapse -s /sbin/nologin synapse
 
 # Install grpc_health_probe for container health checks
-ADD https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/v0.4.25/grpc_health_probe-linux-arm64 /usr/local/bin/grpc_health_probe
+ARG TARGETARCH
+ADD https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/v0.4.25/grpc_health_probe-linux-${TARGETARCH} /usr/local/bin/grpc_health_probe
 RUN chmod +x /usr/local/bin/grpc_health_probe
 
 WORKDIR /opt/synapse
@@ -77,4 +78,4 @@ ENV SYNAPSE_CONFIG_PATH=/opt/synapse/config/default.toml \
     RUST_BACKTRACE=1
 
 ENTRYPOINT ["synapse-server"]
-CMD ["--config", "/opt/synapse/config/default.toml"]
+CMD []

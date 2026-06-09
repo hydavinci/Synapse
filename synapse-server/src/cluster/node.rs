@@ -110,7 +110,11 @@ impl ClusterNode {
         // Enforce max peers to prevent resource exhaustion
         let peers = self.peers.read().await;
         if peers.len() >= self.max_peers {
-            tracing::warn!(peer = node_id, max = self.max_peers, "Cluster join rejected: max peers reached");
+            tracing::warn!(
+                peer = node_id,
+                max = self.max_peers,
+                "Cluster join rejected: max peers reached"
+            );
             return Err("maximum peer count reached");
         }
         drop(peers);

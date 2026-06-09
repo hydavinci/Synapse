@@ -65,11 +65,7 @@ impl ConflictDetector {
 
     /// Detect whether a new record conflicts with an existing record.
     /// Conflict = semantically similar + concurrent vector clocks.
-    pub fn detect(
-        &self,
-        existing: &proto::MemoryRecord,
-        incoming: &proto::MemoryRecord,
-    ) -> bool {
+    pub fn detect(&self, existing: &proto::MemoryRecord, incoming: &proto::MemoryRecord) -> bool {
         // 1. Check semantic similarity (are they about the same thing?)
         let similarity = if !existing.embedding.is_empty() && !incoming.embedding.is_empty() {
             cosine_similarity(&existing.embedding, &incoming.embedding)
@@ -107,10 +103,7 @@ impl ConflictDetector {
 
         let concurrent = Self::clocks_are_concurrent(&clock_a, &clock_b);
 
-        debug!(
-            similarity,
-            concurrent, "Conflict detection result"
-        );
+        debug!(similarity, concurrent, "Conflict detection result");
 
         concurrent
     }

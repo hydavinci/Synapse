@@ -13,7 +13,8 @@ pub struct ScopeResolver;
 impl ScopeResolver {
     /// Check if a record is visible to a querying scope.
     pub fn is_visible(record_scope: &proto::Scope, query_scope: &proto::Scope) -> bool {
-        let visibility = Visibility::try_from(record_scope.visibility).unwrap_or(Visibility::Private);
+        let visibility =
+            Visibility::try_from(record_scope.visibility).unwrap_or(Visibility::Private);
 
         match visibility {
             Visibility::Public => {
@@ -57,8 +58,7 @@ impl ScopeResolver {
     fn exact_match(record_scope: &proto::Scope, query_scope: &proto::Scope) -> bool {
         let matches_org = query_scope.org.is_empty() || record_scope.org == query_scope.org;
         let matches_team = query_scope.team.is_empty() || record_scope.team == query_scope.team;
-        let matches_agent =
-            query_scope.agent.is_empty() || record_scope.agent == query_scope.agent;
+        let matches_agent = query_scope.agent.is_empty() || record_scope.agent == query_scope.agent;
         let matches_user = query_scope.user.is_empty() || record_scope.user == query_scope.user;
         let matches_session =
             query_scope.session.is_empty() || record_scope.session == query_scope.session;

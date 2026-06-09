@@ -38,6 +38,13 @@ local = [
     "sentence-transformers>=2.2.0",
     "torch>=2.0.0",
 ]
+# Development/testing dependencies
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23.0",
+    "respx>=0.21.0",
+    "mypy>=1.0",
+]
 # Remote/distributed mode (connects to Synapse gRPC server)
 remote = [
     "grpcio>=1.60.0",
@@ -47,13 +54,6 @@ remote = [
 # All features
 all = [
     "synapse-memory[local,remote]",
-]
-# Development
-dev = [
-    "pytest>=7.0",
-    "pytest-asyncio>=0.23.0",
-    "respx>=0.21.0",
-    "mypy>=1.0",
 ]
 
 [project.scripts]

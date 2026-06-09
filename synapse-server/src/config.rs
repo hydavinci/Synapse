@@ -119,9 +119,8 @@ fn default_log_level() -> String {
 }
 
 fn default_node_id() -> String {
-    std::env::var("SYNAPSE_NODE_ID").unwrap_or_else(|_| {
-        format!("node-{}", &ulid::Ulid::new().to_string()[..8])
-    })
+    std::env::var("SYNAPSE_NODE_ID")
+        .unwrap_or_else(|_| format!("node-{}", &ulid::Ulid::new().to_string()[..8]))
 }
 
 fn default_consistency() -> String {
@@ -201,8 +200,13 @@ impl Default for ConflictConfig {
 
 impl Config {
     /// Load config from a TOML file, with environment variable overrides.
+    /// Priority: explicit path > SYNAPSE_CONFIG_PATH env var > default candidates.
     pub fn load(path: Option<PathBuf>) -> Self {
-        if let Some(p) = path {
+        // Determine config path
+        let resolved_path =
+            path.or_else(|| std::env::var("SYNAPSE_CONFIG_PATH").ok().map(PathBuf::from));
+
+        if let Some(p) = resolved_path {
             if p.exists() {
                 let content = std::fs::read_to_string(&p).unwrap_or_default();
                 toml::from_str(&content).unwrap_or_default()

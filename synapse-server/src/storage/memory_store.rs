@@ -111,7 +111,8 @@ impl StorageBackend for InMemoryStore {
 
         // CVE-12 fix: Only delete records that are *visible* to the requesting scope.
         // This prevents cross-scope deletion of PRIVATE records.
-        let to_remove: Vec<String> = state.records
+        let to_remove: Vec<String> = state
+            .records
             .iter()
             .filter(|(_id, record)| {
                 if let Some(ref rec_scope) = record.scope {
@@ -158,7 +159,8 @@ impl StorageBackend for InMemoryStore {
     ) -> Result<(Vec<proto::MemoryRecord>, u32)> {
         let state = self.state.read().await;
 
-        let mut matching: Vec<&proto::MemoryRecord> = state.records
+        let mut matching: Vec<&proto::MemoryRecord> = state
+            .records
             .values()
             .filter(|r| {
                 // Scope filter
@@ -213,7 +215,8 @@ impl StorageBackend for InMemoryStore {
 
     async fn store_version(&self, record: &proto::MemoryRecord) -> Result<()> {
         let mut state = self.state.write().await;
-        state.history
+        state
+            .history
             .entry(record.id.clone())
             .or_default()
             .push(record.clone());
@@ -222,7 +225,8 @@ impl StorageBackend for InMemoryStore {
 
     async fn get_all_embeddings(&self) -> Result<Vec<(String, Vec<f32>)>> {
         let state = self.state.read().await;
-        let embeddings: Vec<(String, Vec<f32>)> = state.records
+        let embeddings: Vec<(String, Vec<f32>)> = state
+            .records
             .values()
             .filter(|r| !r.embedding.is_empty())
             .map(|r| (r.id.clone(), r.embedding.clone()))
@@ -269,11 +273,13 @@ fn scope_matches(record_scope: &proto::Scope, query_scope: &proto::Scope) -> boo
 /// CVE-12 fix: Check if the requesting scope has permission to *delete* a record.
 /// Only the owner (exact match) or a scope that is a parent with SCOPE_DOWN visibility
 /// can delete records. PUBLIC/SHARED records can only be deleted by exact scope match.
-fn scope_is_visible_for_delete(record_scope: &proto::Scope, requester_scope: &proto::Scope) -> bool {
+fn scope_is_visible_for_delete(
+    record_scope: &proto::Scope,
+    requester_scope: &proto::Scope,
+) -> bool {
     use crate::proto::Visibility;
 
-    let vis = Visibility::try_from(record_scope.visibility)
-        .unwrap_or(Visibility::Private);
+    let vis = Visibility::try_from(record_scope.visibility).unwrap_or(Visibility::Private);
 
     match vis {
         // PRIVATE: only exact owner can delete
@@ -287,17 +293,11 @@ fn scope_is_visible_for_delete(record_scope: &proto::Scope, requester_scope: &pr
         }
         // SCOPE_DOWN: owner or child can delete their inherited view
         // but only owner should delete the source record
-        Visibility::ScopeDown => {
-            exact_scope_match(record_scope, requester_scope)
-        }
+        Visibility::ScopeDown => exact_scope_match(record_scope, requester_scope),
         // SHARED: only within same org and exact match
-        Visibility::Shared => {
-            exact_scope_match(record_scope, requester_scope)
-        }
+        Visibility::Shared => exact_scope_match(record_scope, requester_scope),
         // PUBLIC: only exact owner can delete
-        Visibility::Public => {
-            exact_scope_match(record_scope, requester_scope)
-        }
+        Visibility::Public => exact_scope_match(record_scope, requester_scope),
     }
 }
 
@@ -347,10 +347,20 @@ fn is_parent_scope(parent: &proto::Scope, child: &proto::Scope) -> bool {
 
 fn scope_depth(scope: &proto::Scope) -> u8 {
     let mut d = 0u8;
-    if !scope.org.is_empty() { d += 1; }
-    if !scope.team.is_empty() { d += 1; }
-    if !scope.agent.is_empty() { d += 1; }
-    if !scope.user.is_empty() { d += 1; }
-    if !scope.session.is_empty() { d += 1; }
+    if !scope.org.is_empty() {
+        d += 1;
+    }
+    if !scope.team.is_empty() {
+        d += 1;
+    }
+    if !scope.agent.is_empty() {
+        d += 1;
+    }
+    if !scope.user.is_empty() {
+        d += 1;
+    }
+    if !scope.session.is_empty() {
+        d += 1;
+    }
     d
 }

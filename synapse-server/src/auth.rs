@@ -56,16 +56,12 @@ impl tonic::service::Interceptor for AuthInterceptor {
                     Err(Status::unauthenticated("Invalid authentication token"))
                 }
             }
-            Some(_) => {
-                Err(Status::unauthenticated(
-                    "Invalid authorization format. Expected: Bearer <token>",
-                ))
-            }
-            None => {
-                Err(Status::unauthenticated(
-                    "Missing authorization metadata. Required: authorization: Bearer <token>",
-                ))
-            }
+            Some(_) => Err(Status::unauthenticated(
+                "Invalid authorization format. Expected: Bearer <token>",
+            )),
+            None => Err(Status::unauthenticated(
+                "Missing authorization metadata. Required: authorization: Bearer <token>",
+            )),
         }
     }
 }
@@ -101,7 +97,9 @@ mod tests {
     fn test_no_token_configured_passes_all() {
         let mut interceptor = AuthInterceptor { token: None };
         assert!(interceptor.call(make_request(None)).is_ok());
-        assert!(interceptor.call(make_request(Some("Bearer anything"))).is_ok());
+        assert!(interceptor
+            .call(make_request(Some("Bearer anything")))
+            .is_ok());
     }
 
     #[test]
@@ -109,7 +107,9 @@ mod tests {
         let mut interceptor = AuthInterceptor {
             token: Some("secret123".to_string()),
         };
-        assert!(interceptor.call(make_request(Some("Bearer secret123"))).is_ok());
+        assert!(interceptor
+            .call(make_request(Some("Bearer secret123")))
+            .is_ok());
     }
 
     #[test]

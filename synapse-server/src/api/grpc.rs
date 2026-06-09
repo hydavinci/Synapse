@@ -132,7 +132,11 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
             scope: req.scope,
             tags: req.tags,
             kind: req.kind,
-            confidence: if req.confidence > 0.0 { req.confidence } else { 1.0 },
+            confidence: if req.confidence > 0.0 {
+                req.confidence
+            } else {
+                1.0
+            },
             source: None,
             created_at: Some(now),
             updated_at: Some(now),
@@ -200,7 +204,11 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
             } else {
                 req.tags
             },
-            kind: if req.kind == 0 { existing.kind } else { req.kind },
+            kind: if req.kind == 0 {
+                existing.kind
+            } else {
+                req.kind
+            },
             confidence: if req.confidence > 0.0 {
                 req.confidence
             } else {
@@ -243,7 +251,11 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
                 .delete(&req.id)
                 .await
                 .map_err(|e| internal_error("storage", e))?;
-            if existed { 1u64 } else { 0u64 }
+            if existed {
+                1u64
+            } else {
+                0u64
+            }
         } else if let Some(scope) = req.scope {
             // Delete by scope
             self.store
@@ -362,13 +374,7 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
             // Without embedding, fall back to listing with filters
             let (records, _) = self
                 .store
-                .list(
-                    req.scope.as_ref(),
-                    &req.kinds,
-                    &req.tags,
-                    top_k as u32,
-                    0,
-                )
+                .list(req.scope.as_ref(), &req.kinds, &req.tags, top_k as u32, 0)
                 .await
                 .map_err(|e| internal_error("storage", e))?;
 
@@ -621,12 +627,11 @@ impl proto::conflict_service_server::ConflictService for ConflictServiceImpl {
                 Status::not_found(format!("Conflict '{}' not found", req.conflict_id))
             })?;
 
-        let strategy =
-            proto::ResolutionStrategy::try_from(req.strategy).unwrap_or(proto::ResolutionStrategy::LastWriterWins);
+        let strategy = proto::ResolutionStrategy::try_from(req.strategy)
+            .unwrap_or(proto::ResolutionStrategy::LastWriterWins);
 
         // Resolve
-        let (resolved_record, reasoning) =
-            ConflictResolver::resolve(&conflict.records, strategy);
+        let (resolved_record, reasoning) = ConflictResolver::resolve(&conflict.records, strategy);
 
         let resolution = ConflictResolver::make_resolution(
             strategy,
@@ -647,10 +652,7 @@ impl proto::conflict_service_server::ConflictService for ConflictServiceImpl {
         // Store the resolved record
         let _ = self.store.update(resolved_record.clone()).await;
 
-        let updated_conflict = self
-            .conflict_detector
-            .get_conflict(&req.conflict_id)
-            .await;
+        let updated_conflict = self.conflict_detector.get_conflict(&req.conflict_id).await;
 
         Ok(Response::new(proto::ResolveConflictResponse {
             conflict: updated_conflict,
@@ -690,13 +692,23 @@ impl proto::cluster_service_server::ClusterService for ClusterServiceImpl {
         if req.node_id.is_empty() || req.node_id.len() > 64 {
             return Err(Status::invalid_argument("node_id must be 1-64 characters"));
         }
-        if !req.node_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-            return Err(Status::invalid_argument("node_id contains invalid characters"));
+        if !req
+            .node_id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(Status::invalid_argument(
+                "node_id contains invalid characters",
+            ));
         }
 
         // handle_join validates cluster secret internally
         // TODO: Pass secret from request metadata once proto supports it
-        match self.cluster.handle_join(&req.node_id, &req.address, None).await {
+        match self
+            .cluster
+            .handle_join(&req.node_id, &req.address, None)
+            .await
+        {
             Ok(status) => Ok(Response::new(proto::JoinResponse {
                 accepted: true,
                 cluster_status: Some(status),

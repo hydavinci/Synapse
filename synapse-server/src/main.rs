@@ -48,7 +48,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    info!("Starting Synapse Memory Server v{}", env!("CARGO_PKG_VERSION"));
+    info!(
+        "Starting Synapse Memory Server v{}",
+        env!("CARGO_PKG_VERSION")
+    );
     info!("Node ID: {}", config.cluster.node_id);
     info!("Listen address: {}", config.listen_addr());
 
@@ -95,7 +98,9 @@ async fn main() -> anyhow::Result<()> {
     if auth.is_enabled() {
         info!("Authentication enabled (Bearer token)");
     } else {
-        tracing::warn!("Authentication DISABLED — server is open to all. Set SYNAPSE_AUTH_TOKEN to secure.");
+        tracing::warn!(
+            "Authentication DISABLED — server is open to all. Set SYNAPSE_AUTH_TOKEN to secure."
+        );
     }
 
     // Build gRPC services
@@ -136,7 +141,9 @@ async fn main() -> anyhow::Result<()> {
         server_builder = server_builder.tls_config(tls)?;
         info!("TLS enabled");
     } else {
-        tracing::warn!("TLS DISABLED — gRPC traffic is unencrypted. Configure [tls] section to secure.");
+        tracing::warn!(
+            "TLS DISABLED — gRPC traffic is unencrypted. Configure [tls] section to secure."
+        );
     }
 
     // CVE-13: Global concurrency limit — max 256 concurrent requests
@@ -145,9 +152,18 @@ async fn main() -> anyhow::Result<()> {
     server_builder
         .layer(concurrency_limit)
         .add_service(health_service)
-        .add_service(MemoryServiceServer::with_interceptor(memory_service, auth.clone()))
-        .add_service(ConflictServiceServer::with_interceptor(conflict_service, auth.clone()))
-        .add_service(ClusterServiceServer::with_interceptor(cluster_service, auth))
+        .add_service(MemoryServiceServer::with_interceptor(
+            memory_service,
+            auth.clone(),
+        ))
+        .add_service(ConflictServiceServer::with_interceptor(
+            conflict_service,
+            auth.clone(),
+        ))
+        .add_service(ClusterServiceServer::with_interceptor(
+            cluster_service,
+            auth,
+        ))
         .serve_with_shutdown(addr, shutdown_signal())
         .await?;
 

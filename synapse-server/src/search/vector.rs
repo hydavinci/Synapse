@@ -1,5 +1,5 @@
-use std::collections::BinaryHeap;
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use crate::storage::StorageBackend;
@@ -23,7 +23,10 @@ impl Ord for ScoredItem {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse order: smaller scores at top of heap (min-heap)
         // So `pop()` removes the smallest score, keeping top-K largest.
-        other.score.partial_cmp(&self.score).unwrap_or(Ordering::Equal)
+        other
+            .score
+            .partial_cmp(&self.score)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -59,7 +62,11 @@ impl VectorSearch {
         // Dimension validation
         const MAX_DIMS: usize = 4096;
         if query_embedding.len() > MAX_DIMS {
-            anyhow::bail!("query embedding exceeds maximum dimensions ({} > {})", query_embedding.len(), MAX_DIMS);
+            anyhow::bail!(
+                "query embedding exceeds maximum dimensions ({} > {})",
+                query_embedding.len(),
+                MAX_DIMS
+            );
         }
 
         let all_embeddings = self.store.get_all_embeddings().await?;
@@ -90,17 +97,18 @@ impl VectorSearch {
                 continue;
             }
 
-            heap.push(ScoredItem { score, id: id.clone() });
+            heap.push(ScoredItem {
+                score,
+                id: id.clone(),
+            });
             if heap.len() > top_k {
                 heap.pop(); // Evict smallest
             }
         }
 
         // Drain heap into sorted vec (descending by score)
-        let mut results: Vec<(String, f32)> = heap
-            .into_iter()
-            .map(|item| (item.id, item.score))
-            .collect();
+        let mut results: Vec<(String, f32)> =
+            heap.into_iter().map(|item| (item.id, item.score)).collect();
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
 
         Ok(results)
@@ -137,7 +145,7 @@ fn cosine_similarity_precomputed(query: &[f32], query_mag: f32, other: &[f32]) -
 /// Compute cosine similarity between two vectors.
 /// Returns 0.0 if either vector is empty or has zero magnitude.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-#[allow(dead_code)]
+    #[allow(dead_code)]
     if a.is_empty() || b.is_empty() || a.len() != b.len() {
         return 0.0;
     }

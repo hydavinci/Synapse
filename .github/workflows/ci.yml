@@ -71,9 +71,54 @@ jobs:
 
       - name: Type check
         working-directory: synapse-py
+        run: mypy synapse_memory/ --ignore-missing-imports
+
+  integration-test:
+    name: E2E Integration Test
+    runs-on: ubuntu-latest
+    needs: [rust-build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protobuf compiler
+        run: sudo apt-get install -y protobuf-compiler
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python test deps
+        run: pip install grpcio grpcio-health-checking
+
+      - name: Generate Python gRPC stubs
         run: |
-          pip install mypy
-          mypy synapse_memory/ --ignore-missing-imports
+          pip install grpcio-tools
+          python -m grpc_tools.protoc -Iproto \
+            --python_out=synapse-py/synapse_memory/_grpc_stubs \
+            --grpc_python_out=synapse-py/synapse_memory/_grpc_stubs \
+            proto/synapse/v1/memory.proto proto/synapse/v1/conflict.proto proto/synapse/v1/cluster.proto
+
+      - name: Run E2E tests
+        run: |
+          PYTHONPATH=synapse-py/synapse_memory/_grpc_stubs python tests/test_e2e_grpc.py
 
   docker:
     name: Docker Build
