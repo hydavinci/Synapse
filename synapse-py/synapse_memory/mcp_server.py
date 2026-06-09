@@ -254,7 +254,8 @@ class SynapseMCPServer:
                 return [TextContent(type="text", text=result)]
             except Exception as e:
                 logger.exception("Tool call failed: %s", name)
-                return [TextContent(type="text", text=f"Error: {e}")]
+                # CVE-16: Don't expose internal error details to MCP client
+                return [TextContent(type="text", text=f"Error: operation failed ({type(e).__name__})")]
 
     async def _dispatch_tool(self, name: str, arguments: dict[str, Any]) -> str:
         """Route tool call to local or remote backend."""

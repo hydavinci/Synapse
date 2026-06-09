@@ -119,7 +119,9 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // Event broadcast channel
-    let (events_tx, _) = broadcast::channel::<proto::MemoryEvent>(1024);
+    // CVE-7: Reduced buffer to 256 to limit memory usage from slow consumers.
+    // Lagged receivers will skip messages (BroadcastStream handles this gracefully).
+    let (events_tx, _) = broadcast::channel::<proto::MemoryEvent>(256);
 
     // Health reporter (gRPC health checking protocol)
     let (mut health_reporter, health_service) = health_reporter();
@@ -162,8 +164,31 @@ async fn main() -> anyhow::Result<()> {
     // CVE-13: Global rate limit — 1000 requests/second across all services
     let rate_limit = RateLimitLayer::new(1000, Duration::from_secs(1));
 
-    Server::builder()
-        .layer(rate_limit)
+    // CVE-15: TLS support
+    let mut builder = Server::builder().layer(rate_limit);
+
+    if let Some(ref tls_config) = config.tls {
+        use tonic::transport::{Identity, ServerTlsConfig};
+        let cert = tokio::fs::read(&tls_config.cert_path).await?;
+        let key = tokio::fs::read(&tls_config.key_path).await?;
+        let identity = Identity::from_pem(cert, key);
+
+        let mut tls = ServerTlsConfig::new().identity(identity);
+
+        if let Some(ref ca_path) = tls_config.ca_cert_path {
+            let ca = tokio::fs::read(ca_path).await?;
+            let ca_cert = tonic::transport::Certificate::from_pem(ca);
+            tls = tls.client_ca_root(ca_cert);
+            info!("mTLS enabled (client certificate verification)");
+        }
+
+        builder = builder.tls_config(tls)?;
+        info!("TLS enabled");
+    } else {
+        tracing::warn!("TLS DISABLED — gRPC traffic is unencrypted. Configure [tls] section to secure.");
+    }
+
+    builder
         .add_service(health_service)
         .add_service(MemoryServiceServer::with_interceptor(memory_service, auth.clone()))
         .add_service(ConflictServiceServer::with_interceptor(conflict_service, auth.clone()))

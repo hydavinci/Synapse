@@ -14,6 +14,15 @@ use crate::scope::ScopeResolver;
 use crate::search::VectorSearch;
 use crate::storage::StorageBackend;
 
+/// CVE-16: Log full error internally, return opaque message to client.
+/// Prevents leaking internal paths, stack traces, or implementation details.
+fn internal_error(context: &str, err: impl std::fmt::Display) -> Status {
+    // Log full error for operators
+    tracing::error!(%err, context, "Internal error");
+    // Return opaque message to client (no internal details)
+    Status::internal(format!("{context}: internal server error"))
+}
+
 /// gRPC implementation of MemoryService.
 pub struct MemoryServiceImpl {
     store: Arc<dyn StorageBackend>,
@@ -137,7 +146,7 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
             .store
             .add(record)
             .await
-            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+            .map_err(|e| internal_error("storage", e))?;
 
         // Update cluster record count
         let count = self.store.count().await.unwrap_or(0);
@@ -166,7 +175,7 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
             .store
             .get(&req.id)
             .await
-            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?
+            .map_err(|e| internal_error("storage", e))?
             .ok_or_else(|| Status::not_found(format!("Record '{}' not found", req.id)))?;
 
         // Store previous version in history
@@ -209,7 +218,7 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
             .store
             .update(updated)
             .await
-            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+            .map_err(|e| internal_error("storage", e))?;
 
         self.emit_event(proto::EventType::MemoryUpdated, &stored);
         info!(id = %req.id, "Memory record updated");
@@ -231,14 +240,14 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
                 .store
                 .delete(&req.id)
                 .await
-                .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+                .map_err(|e| internal_error("storage", e))?;
             if existed { 1u64 } else { 0u64 }
         } else if let Some(scope) = req.scope {
             // Delete by scope
             self.store
                 .delete_by_scope(&scope, req.before)
                 .await
-                .map_err(|e| Status::internal(format!("Storage error: {}", e)))?
+                .map_err(|e| internal_error("storage", e))?
         } else {
             return Err(Status::invalid_argument(
                 "Either 'id' or 'scope' must be provided",
@@ -266,7 +275,7 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
             .store
             .get(&req.id)
             .await
-            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?
+            .map_err(|e| internal_error("storage", e))?
             .ok_or_else(|| Status::not_found(format!("Record '{}' not found", req.id)))?;
 
         Ok(Response::new(proto::GetResponse {
@@ -289,14 +298,14 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
                 .search
                 .search(&req.query_embedding, top_k, min_score)
                 .await
-                .map_err(|e| Status::internal(format!("Search error: {}", e)))?;
+                .map_err(|e| internal_error("search", e))?;
 
             let ids: Vec<String> = scored.iter().map(|(id, _)| id.clone()).collect();
             let records = self
                 .store
                 .get_many(&ids)
                 .await
-                .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+                .map_err(|e| internal_error("storage", e))?;
 
             // Apply scope visibility filter
             // CVE-4 fix: scope=None means only PUBLIC records are visible
@@ -359,7 +368,7 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
                     0,
                 )
                 .await
-                .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+                .map_err(|e| internal_error("storage", e))?;
 
             // Apply scope visibility
             // CVE-4 fix: scope=None means only PUBLIC records are visible
@@ -402,7 +411,7 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
             .store
             .list(req.scope.as_ref(), &req.kinds, &req.tags, limit, req.offset)
             .await
-            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+            .map_err(|e| internal_error("storage", e))?;
 
         // Apply scope visibility
         // CVE-4 fix: scope=None means only PUBLIC records are visible
@@ -436,7 +445,7 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
             .store
             .history(&req.id)
             .await
-            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+            .map_err(|e| internal_error("storage", e))?;
 
         Ok(Response::new(proto::HistoryResponse { versions }))
     }
@@ -523,7 +532,7 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
             .store
             .list(req.scope.as_ref(), &[], &[], u32::MAX, 0)
             .await
-            .map_err(|e| Status::internal(format!("Export error: {}", e)))?;
+            .map_err(|e| internal_error("export", e))?;
 
         let stream = tokio_stream::iter(records.into_iter().map(Ok));
         Ok(Response::new(Box::pin(stream)))

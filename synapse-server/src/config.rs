@@ -31,6 +31,21 @@ pub struct Config {
     /// Maximum embedding dimensions (default: 4096).
     #[serde(default = "default_max_embedding_dims")]
     pub max_embedding_dims: usize,
+
+    /// TLS configuration for gRPC server.
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+}
+
+/// TLS configuration for the gRPC server.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TlsConfig {
+    /// Path to PEM-encoded server certificate.
+    pub cert_path: PathBuf,
+    /// Path to PEM-encoded server private key.
+    pub key_path: PathBuf,
+    /// Optional path to CA certificate for client verification (mTLS).
+    pub ca_cert_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -147,6 +162,7 @@ impl Default for Config {
             cluster_secret: None,
             max_content_bytes: default_max_content_bytes(),
             max_embedding_dims: default_max_embedding_dims(),
+            tls: None,
         }
     }
 }

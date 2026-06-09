@@ -41,10 +41,11 @@ class LocalStore:
     ) -> None:
         self._db_path = db_path or _default_db_path()
         self._embedding_fn = embedding_fn
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # CVE-14: RLock for read+write consistency
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")  # Wait up to 5s on contention
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
 

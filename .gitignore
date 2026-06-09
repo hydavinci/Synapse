@@ -1,7 +1,8 @@
 # Rust
 target/
 **/*.rs.bk
-Cargo.lock
+# Note: Cargo.lock IS committed for the server binary (recommended for apps)
+# See: https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html
 
 # Python
 __pycache__/
