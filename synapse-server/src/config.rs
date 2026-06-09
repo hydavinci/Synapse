@@ -202,7 +202,7 @@ impl Default for ConflictConfig {
 impl Config {
     /// Load config from a TOML file, with environment variable overrides.
     pub fn load(path: Option<PathBuf>) -> Self {
-        let config = if let Some(p) = path {
+        if let Some(p) = path {
             if p.exists() {
                 let content = std::fs::read_to_string(&p).unwrap_or_default();
                 toml::from_str(&content).unwrap_or_default()
@@ -223,9 +223,7 @@ impl Config {
                 }
             }
             loaded.unwrap_or_default()
-        };
-
-        config
+        }
     }
 
     /// Get the server listen address.

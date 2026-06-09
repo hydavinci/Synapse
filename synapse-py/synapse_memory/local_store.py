@@ -84,8 +84,51 @@ class LocalStore:
                 ON memories(scope_org, scope_team, scope_user, scope_agent);
             CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind);
             CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
+
+            -- FTS5 full-text search index (content + tags)
+            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                content,
+                tags,
+                content='memories',
+                content_rowid='rowid'
+            );
+
+            -- Triggers to keep FTS index in sync
+            CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+                INSERT INTO memories_fts(rowid, content, tags)
+                VALUES (new.rowid, new.content, new.tags);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, content, tags)
+                VALUES ('delete', old.rowid, old.content, old.tags);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, content, tags)
+                VALUES ('delete', old.rowid, old.content, old.tags);
+                INSERT INTO memories_fts(rowid, content, tags)
+                VALUES (new.rowid, new.content, new.tags);
+            END;
         """)
         self._conn.commit()
+
+        # Rebuild FTS index if table was created before FTS was added
+        self._rebuild_fts_if_needed()
+
+    def _rebuild_fts_if_needed(self) -> None:
+        """Rebuild FTS index on first run after upgrade."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) as cnt FROM memories_fts"
+        ).fetchone()
+        fts_count = row["cnt"] if row else 0
+        row2 = self._conn.execute(
+            "SELECT COUNT(*) as cnt FROM memories"
+        ).fetchone()
+        mem_count = row2["cnt"] if row2 else 0
+        if mem_count > 0 and fts_count == 0:
+            self._conn.execute(
+                "INSERT INTO memories_fts(memories_fts) VALUES('rebuild')"
+            )
+            self._conn.commit()
 
     def add(
         self,
@@ -414,7 +457,67 @@ class LocalStore:
         top_k: int,
         tags: Optional[list[str]],
     ) -> list[SearchResult]:
-        """Simple keyword-based search fallback."""
+        """FTS5-accelerated keyword search with fallback to LIKE scan."""
+        # Try FTS5 first (much faster for large datasets)
+        try:
+            return self._fts5_search(query, where, params, top_k, tags)
+        except Exception:
+            # Fall back to brute-force scan if FTS5 unavailable
+            return self._fallback_keyword_search(query, where, params, top_k, tags)
+
+    def _fts5_search(
+        self,
+        query: str,
+        where: str,
+        params: list,
+        top_k: int,
+        tags: Optional[list[str]],
+    ) -> list[SearchResult]:
+        """Use FTS5 index for fast full-text keyword search."""
+        # Escape FTS5 special characters and build OR query
+        terms = query.split()
+        if not terms:
+            return []
+        # Quote each term to avoid FTS5 syntax errors
+        fts_query = " OR ".join(f'"{t}"' for t in terms[:20])  # cap at 20 terms
+
+        # Join FTS results with the memories table for scope filtering
+        sql = f"""SELECT m.*, rank AS fts_rank
+                  FROM memories_fts fts
+                  JOIN memories m ON m.rowid = fts.rowid
+                  WHERE memories_fts MATCH ?
+                    AND {where}
+                  ORDER BY fts_rank
+                  LIMIT ?"""
+        rows = self._conn.execute(sql, [fts_query] + params + [top_k * 3]).fetchall()
+
+        results: list[SearchResult] = []
+        for row in rows:
+            # Tag filter
+            if tags:
+                record_tags = json.loads(row["tags"])
+                if not all(t in record_tags for t in tags):
+                    continue
+
+            record = self._row_to_record(row)
+            # FTS5 rank is negative (lower = better); normalize to 0..1
+            fts_rank = abs(row["fts_rank"]) if row["fts_rank"] else 0
+            score = 1.0 / (1.0 + fts_rank)  # sigmoid-like normalization
+            results.append(SearchResult(record=record, score=score))
+            if len(results) >= top_k:
+                break
+
+        return results
+
+    def _fallback_keyword_search(
+        self,
+        query: str,
+        where: str,
+        params: list,
+        top_k: int,
+        tags: Optional[list[str]],
+    ) -> list[SearchResult]:
+        """Brute-force keyword matching (fallback when FTS5 unavailable)."""
         rows = self._conn.execute(
             f"SELECT * FROM memories WHERE {where} ORDER BY updated_at DESC LIMIT 200",
             params,

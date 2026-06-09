@@ -86,6 +86,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
     use tonic::metadata::MetadataValue;
+    use tonic::service::Interceptor;
 
     fn make_request(auth: Option<&str>) -> Request<()> {
         let mut req = Request::new(());
