@@ -24,6 +24,7 @@ fn internal_error(context: &str, err: impl std::fmt::Display) -> Status {
 }
 
 /// gRPC implementation of MemoryService.
+#[allow(dead_code)]
 pub struct MemoryServiceImpl {
     store: Arc<dyn StorageBackend>,
     search: Arc<VectorSearch>,
@@ -82,6 +83,7 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
 
         // === Input validation (CVE-17: prevent oversized payloads) ===
         const MAX_CONTENT_BYTES: usize = 1_048_576; // 1MB
+        #[allow(dead_code)]
         const MAX_EMBEDDING_DIMS: usize = 4096;
         const MAX_TAGS: usize = 100;
         const MAX_TAG_LEN: usize = 256;

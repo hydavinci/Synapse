@@ -1,6 +1,7 @@
 mod api;
 mod cluster;
 mod config;
+#[allow(dead_code)]
 mod conflict;
 mod scope;
 mod search;

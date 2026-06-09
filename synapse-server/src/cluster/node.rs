@@ -21,6 +21,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Represents this node in a cluster.
 /// For v0.1, this is a single-node implementation with stubs for multi-node operations.
+#[allow(dead_code)]
 pub struct ClusterNode {
     /// This node's unique ID
     pub node_id: String,
@@ -38,6 +39,7 @@ pub struct ClusterNode {
     max_peers: usize,
 }
 
+#[allow(dead_code)]
 impl ClusterNode {
     pub fn new(node_id: String, address: String) -> Self {
         Self::with_secret(node_id, address, None)

@@ -107,6 +107,7 @@ impl VectorSearch {
     }
 
     /// Compute similarity between two records' embeddings.
+    #[allow(dead_code)]
     pub fn similarity(a: &[f32], b: &[f32]) -> f32 {
         cosine_similarity(a, b)
     }
@@ -136,6 +137,7 @@ fn cosine_similarity_precomputed(query: &[f32], query_mag: f32, other: &[f32]) -
 /// Compute cosine similarity between two vectors.
 /// Returns 0.0 if either vector is empty or has zero magnitude.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+#[allow(dead_code)]
     if a.is_empty() || b.is_empty() || a.len() != b.len() {
         return 0.0;
     }

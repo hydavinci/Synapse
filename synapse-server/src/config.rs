@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 /// Server configuration loaded from file or environment variables.
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct Config {
     #[serde(default = "default_server")]
     pub server: ServerConfig,
@@ -61,6 +62,7 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct ClusterConfig {
     #[serde(default = "default_node_id")]
     pub node_id: String,
@@ -73,6 +75,7 @@ pub struct ClusterConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct StorageConfig {
     #[serde(default = "default_backend")]
     pub backend: String,
@@ -82,6 +85,7 @@ pub struct StorageConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct ConflictConfig {
     #[serde(default = "default_similarity_threshold")]
     pub similarity_threshold: f32,
