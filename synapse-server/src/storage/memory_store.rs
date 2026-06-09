@@ -277,7 +277,7 @@ fn scope_is_visible_for_delete(record_scope: &proto::Scope, requester_scope: &pr
 
     match vis {
         // PRIVATE: only exact owner can delete
-        Visibility::Private | Visibility::VisibilityUnspecified => {
+        Visibility::Private | Visibility::Unspecified => {
             exact_scope_match(record_scope, requester_scope)
         }
         // SCOPE_UP: owner or parent can delete

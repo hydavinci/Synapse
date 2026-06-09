@@ -267,19 +267,23 @@ class SynapseMCPServer:
     # ─── Local dispatch ───────────────────────────────────────────────
 
     async def _dispatch_local(self, name: str, arguments: dict[str, Any]) -> str:
-        """Handle tool calls using local SQLite store."""
+        """Handle tool calls using local SQLite store.
+
+        Local operations are synchronous (SQLite). We run them in a thread pool
+        to avoid blocking the async event loop (CVE-7/P1 fix).
+        """
         store = self._get_store()
 
         if name == "memory_store":
-            return self._local_store(store, arguments)
+            return await asyncio.to_thread(self._local_store, store, arguments)
         elif name == "memory_recall":
-            return self._local_recall(store, arguments)
+            return await asyncio.to_thread(self._local_recall, store, arguments)
         elif name == "memory_forget":
-            return self._local_forget(store, arguments)
+            return await asyncio.to_thread(self._local_forget, store, arguments)
         elif name == "memory_update":
-            return self._local_update(store, arguments)
+            return await asyncio.to_thread(self._local_update, store, arguments)
         elif name == "memory_list":
-            return self._local_list(store, arguments)
+            return await asyncio.to_thread(self._local_list, store, arguments)
         else:
             raise ValueError(f"Unknown tool: {name}")
 

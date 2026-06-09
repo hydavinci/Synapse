@@ -293,7 +293,7 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
         let min_score = req.min_score;
 
         // If query_embedding is provided, use vector search
-        let results = if !req.query_embedding.is_empty() {
+        let results: Vec<proto::SearchResult> = if !req.query_embedding.is_empty() {
             let scored = self
                 .search
                 .search(&req.query_embedding, top_k, min_score)

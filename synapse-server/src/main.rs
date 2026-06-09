@@ -10,61 +10,15 @@ mod storage;
 #[allow(clippy::all)]
 pub mod proto {
     tonic::include_proto!("synapse.v1");
-
-    // Re-export resolution strategy for ergonomics
-    impl ResolutionStrategy {
-        pub fn try_from(value: i32) -> Option<Self> {
-            match value {
-                0 => Some(Self::ResolutionStrategyUnspecified),
-                1 => Some(Self::LastWriterWins),
-                2 => Some(Self::FirstWriterWins),
-                3 => Some(Self::LlmMerge),
-                4 => Some(Self::KeepBoth),
-                5 => Some(Self::ManualResolution),
-                6 => Some(Self::ConfidenceWins),
-                7 => Some(Self::Custom),
-                _ => None,
-            }
-        }
-    }
-
-    impl Visibility {
-        pub fn try_from(value: i32) -> Option<Self> {
-            match value {
-                0 => Some(Self::VisibilityUnspecified),
-                1 => Some(Self::Private),
-                2 => Some(Self::ScopeUp),
-                3 => Some(Self::ScopeDown),
-                4 => Some(Self::Shared),
-                5 => Some(Self::Public),
-                _ => None,
-            }
-        }
-    }
-
-    impl EventType {
-        pub const fn from_i32(value: i32) -> Self {
-            match value {
-                1 => Self::MemoryAdded,
-                2 => Self::MemoryUpdated,
-                3 => Self::MemoryForgotten,
-                4 => Self::ConflictDetected,
-                5 => Self::ConflictResolved,
-                6 => Self::MemoryExpired,
-                _ => Self::EventAll,
-            }
-        }
-    }
 }
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::signal;
 use tokio::sync::broadcast;
 use tonic::transport::Server;
 use tonic_health::server::health_reporter;
-use tower::limit::RateLimitLayer;
+use tower::limit::ConcurrencyLimitLayer;
 use tracing::info;
 
 mod auth;
@@ -160,12 +114,8 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Synapse server listening on {}", addr);
 
-    // Start server with graceful shutdown
-    // CVE-13: Global rate limit — 1000 requests/second across all services
-    let rate_limit = RateLimitLayer::new(1000, Duration::from_secs(1));
-
-    // CVE-15: TLS support
-    let mut builder = Server::builder().layer(rate_limit);
+    // CVE-15: TLS support — must be configured before adding layers
+    let mut server_builder = Server::builder();
 
     if let Some(ref tls_config) = config.tls {
         use tonic::transport::{Identity, ServerTlsConfig};
@@ -182,13 +132,17 @@ async fn main() -> anyhow::Result<()> {
             info!("mTLS enabled (client certificate verification)");
         }
 
-        builder = builder.tls_config(tls)?;
+        server_builder = server_builder.tls_config(tls)?;
         info!("TLS enabled");
     } else {
         tracing::warn!("TLS DISABLED — gRPC traffic is unencrypted. Configure [tls] section to secure.");
     }
 
-    builder
+    // CVE-13: Global concurrency limit — max 256 concurrent requests
+    let concurrency_limit = ConcurrencyLimitLayer::new(256);
+
+    server_builder
+        .layer(concurrency_limit)
         .add_service(health_service)
         .add_service(MemoryServiceServer::with_interceptor(memory_service, auth.clone()))
         .add_service(ConflictServiceServer::with_interceptor(conflict_service, auth.clone()))
