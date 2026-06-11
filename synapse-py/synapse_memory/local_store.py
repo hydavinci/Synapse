@@ -301,21 +301,22 @@ class LocalStore:
         embeddings: list[Optional[list[float]]] = [None] * len(prepared)
         if self._batch_embedding_fn:
             try:
-                embeddings = self._batch_embedding_fn(contents)
+                embeddings = list(self._batch_embedding_fn(contents))  # type: ignore[assignment]
             except Exception as e:
                 logger.warning("Batch embedding failed, falling back to individual: %s", e)
                 if self._embedding_fn:
-                    embeddings = [self._embedding_fn(c) for c in contents]
+                    embeddings = [self._embedding_fn(c) for c in contents]  # type: ignore[misc]
         elif self._embedding_fn and not self._async_embed:
-            embeddings = [self._embedding_fn(c) for c in contents]
+            embeddings = [self._embedding_fn(c) for c in contents]  # type: ignore[misc]
 
         # Insert all records
         result_records = []
         with self._lock:
             for i, rec in enumerate(prepared):
                 embedding_blob = None
-                if embeddings[i] is not None:
-                    embedding_blob = self._encode_embedding(embeddings[i])
+                emb = embeddings[i]
+                if emb is not None:
+                    embedding_blob = self._encode_embedding(emb)
 
                 scope = rec["scope"]
                 self._conn.execute(
