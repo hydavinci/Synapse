@@ -7,14 +7,18 @@ use tracing::debug;
 use crate::proto;
 use crate::search::vector::cosine_similarity;
 
+use super::store::ConflictStore;
+
 /// Detects conflicts between memory records using vector clocks
 /// and semantic similarity.
 pub struct ConflictDetector {
-    /// Stored conflicts: conflict_id -> Conflict
+    /// Stored conflicts: conflict_id -> Conflict (in-memory fallback)
     conflicts: Arc<RwLock<HashMap<String, proto::Conflict>>>,
     /// Semantic similarity threshold for considering records as targeting
     /// the same logical memory
     similarity_threshold: f32,
+    /// Optional persistent conflict store
+    persistent_store: Option<Arc<ConflictStore>>,
 }
 
 impl ConflictDetector {
@@ -22,6 +26,16 @@ impl ConflictDetector {
         Self {
             conflicts: Arc::new(RwLock::new(HashMap::new())),
             similarity_threshold,
+            persistent_store: None,
+        }
+    }
+
+    /// Create a ConflictDetector with a persistent store for conflict durability.
+    pub fn with_store(similarity_threshold: f32, store: Arc<ConflictStore>) -> Self {
+        Self {
+            conflicts: Arc::new(RwLock::new(HashMap::new())),
+            similarity_threshold,
+            persistent_store: Some(store),
         }
     }
 
@@ -110,14 +124,34 @@ impl ConflictDetector {
 
     /// Register a detected conflict.
     pub async fn register_conflict(&self, conflict: proto::Conflict) {
+        // Persist if store is available
+        if let Some(ref store) = self.persistent_store {
+            if let Err(e) = store.save(&conflict).await {
+                tracing::error!("Failed to persist conflict: {}", e);
+            }
+        }
+
         let mut conflicts = self.conflicts.write().await;
         conflicts.insert(conflict.id.clone(), conflict);
     }
 
     /// Get a conflict by ID.
     pub async fn get_conflict(&self, id: &str) -> Option<proto::Conflict> {
+        // Try in-memory first
         let conflicts = self.conflicts.read().await;
-        conflicts.get(id).cloned()
+        if let Some(c) = conflicts.get(id) {
+            return Some(c.clone());
+        }
+        drop(conflicts);
+
+        // Fall back to persistent store
+        if let Some(ref store) = self.persistent_store {
+            if let Ok(Some(c)) = store.get(id).await {
+                return Some(c);
+            }
+        }
+
+        None
     }
 
     /// List conflicts with optional status filter.
@@ -127,6 +161,14 @@ impl ConflictDetector {
         limit: u32,
         offset: u32,
     ) -> (Vec<proto::Conflict>, u32) {
+        // If persistent store is available, use it
+        if let Some(ref store) = self.persistent_store {
+            if let Ok(result) = store.list(status_filter, limit, offset).await {
+                return result;
+            }
+        }
+
+        // Fall back to in-memory
         let conflicts = self.conflicts.read().await;
 
         let matching: Vec<&proto::Conflict> = conflicts
@@ -158,6 +200,13 @@ impl ConflictDetector {
         status: i32,
         resolution: Option<proto::Resolution>,
     ) -> Option<proto::Conflict> {
+        // Update persistent store if available
+        if let Some(ref store) = self.persistent_store {
+            let _ = store
+                .update_status(conflict_id, status, resolution.as_ref())
+                .await;
+        }
+
         let mut conflicts = self.conflicts.write().await;
         if let Some(conflict) = conflicts.get_mut(conflict_id) {
             conflict.status = status;

@@ -8,6 +8,7 @@ mod metrics;
 mod scope;
 mod search;
 mod storage;
+pub mod util;
 
 /// Auto-generated protobuf/gRPC code.
 #[allow(clippy::all)]

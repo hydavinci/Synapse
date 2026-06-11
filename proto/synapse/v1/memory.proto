@@ -16,6 +16,9 @@ message MemoryRecord {
   float confidence = 7;
   Source source = 8;
 
+  // Reserved field numbers for future use
+  reserved 9, 14 to 19, 23 to 29;
+
   google.protobuf.Timestamp created_at = 10;
   google.protobuf.Timestamp updated_at = 11;
   google.protobuf.Timestamp accessed_at = 12;
@@ -235,6 +238,23 @@ message ImportResponse {
   uint64 skipped_count = 2;
 }
 
+// === Embed Request/Response ===
+
+// Request to attach or update an embedding for a stored memory record.
+// This is part of the embedding lifecycle:
+//   1. Client calls Add() to store content (no embedding yet)
+//   2. Client computes embedding externally (or via a sidecar service)
+//   3. Client calls Embed() to attach the embedding to the record
+//   4. Record is now searchable via vector similarity
+message EmbedRequest {
+  string id = 1;
+  repeated float embedding = 2;
+}
+
+message EmbedResponse {
+  MemoryRecord record = 1;
+}
+
 // === Memory Service ===
 
 service MemoryService {
@@ -249,4 +269,9 @@ service MemoryService {
   rpc BatchAdd(BatchAddRequest) returns (BatchAddResponse);
   rpc Export(ExportRequest) returns (stream MemoryRecord);
   rpc Import(stream MemoryRecord) returns (ImportResponse);
+
+  // Attach or update an embedding for an existing memory record.
+  // Part of the embedding lifecycle: store content first, compute embedding
+  // externally, then call Embed to make the record searchable.
+  rpc Embed(EmbedRequest) returns (EmbedResponse);
 }

@@ -117,7 +117,7 @@ impl HnswIndex {
         let mut output = Vec::with_capacity(results.keys.len());
         for (key, distance) in results.keys.iter().zip(results.distances.iter()) {
             let idx = *key as usize;
-            if idx < state.key_to_id.len() {
+            if idx < state.key_to_id.len() && !state.key_to_id[idx].is_empty() {
                 // usearch cosine distance = 1 - similarity, convert back to similarity
                 let similarity = 1.0 - distance;
                 output.push((state.key_to_id[idx].clone(), similarity));
@@ -125,6 +125,70 @@ impl HnswIndex {
         }
 
         Ok(output)
+    }
+
+    /// Mark a vector as deleted by clearing its ID mapping.
+    /// Since usearch doesn't support true deletion easily, we mark the
+    /// key_to_id entry as empty so it's excluded from search results.
+    /// Call `rebuild` periodically to reclaim space.
+    #[allow(dead_code)]
+    pub async fn remove(&self, id: &str) {
+        let mut state = self.inner.write().await;
+        // Find and clear the key_to_id entry
+        for entry in state.key_to_id.iter_mut() {
+            if entry == id {
+                *entry = String::new();
+                break;
+            }
+        }
+    }
+
+    /// Rebuild the index from scratch, excluding deleted entries.
+    /// This reclaims space from removed vectors and should be called
+    /// periodically as maintenance (e.g., nightly or when deletion ratio is high).
+    #[allow(dead_code)]
+    pub async fn rebuild(&self, embeddings: &[(String, Vec<f32>)]) -> Result<()> {
+        let mut state = self.inner.write().await;
+
+        let dimensions = embeddings.first().map(|(_, e)| e.len()).unwrap_or(state.dimensions);
+
+        let options = IndexOptions {
+            dimensions,
+            metric: MetricKind::Cos,
+            quantization: ScalarKind::F32,
+            connectivity: 16,
+            expansion_add: 128,
+            expansion_search: 64,
+            multi: false,
+        };
+
+        let new_index = Index::new(&options)?;
+        let capacity = (embeddings.len() + 10_000).max(20_000);
+        new_index.reserve(capacity)?;
+
+        let mut new_key_to_id = Vec::with_capacity(embeddings.len());
+        let mut next_key: u64 = 0;
+
+        for (id, embedding) in embeddings {
+            if embedding.len() != dimensions {
+                continue;
+            }
+            new_index.add(next_key, embedding)?;
+            new_key_to_id.push(id.clone());
+            next_key += 1;
+        }
+
+        state.index = new_index;
+        state.key_to_id = new_key_to_id;
+        state.next_key = next_key;
+        state.dimensions = dimensions;
+
+        info!(
+            count = embeddings.len(),
+            "HNSW index rebuilt successfully"
+        );
+
+        Ok(())
     }
 
     /// Get the number of vectors in the index.

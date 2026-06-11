@@ -643,6 +643,28 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
             skipped_count: skipped,
         }))
     }
+
+    /// Attach or update an embedding for an existing memory record.
+    ///
+    /// This is part of the embedding lifecycle:
+    /// 1. Client stores content via `Add()` (no embedding yet)
+    /// 2. Client computes embedding externally (e.g., via OpenAI, sentence-transformers)
+    /// 3. Client calls `Embed()` to attach the embedding vector to the record
+    /// 4. Record becomes searchable via vector similarity in `Search()`
+    ///
+    /// Currently returns UNIMPLEMENTED — full implementation will:
+    /// - Validate embedding dimensions against configured model
+    /// - Store the embedding in the record
+    /// - Update the HNSW index for ANN search
+    /// - Emit a MEMORY_UPDATED event
+    async fn embed(
+        &self,
+        _request: Request<proto::EmbedRequest>,
+    ) -> Result<Response<proto::EmbedResponse>, Status> {
+        Err(Status::unimplemented(
+            "Embed RPC is not yet implemented. Embeddings should be provided via Update or computed by an external embedding service.",
+        ))
+    }
 }
 
 /// gRPC implementation of ConflictService.

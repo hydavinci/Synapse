@@ -2,6 +2,7 @@ use tonic::{Request, Status};
 use tracing::warn;
 
 use crate::config::Config;
+use crate::util::constant_time_eq;
 
 /// Bearer token authentication interceptor for gRPC services.
 ///
@@ -64,18 +65,6 @@ impl tonic::service::Interceptor for AuthInterceptor {
             )),
         }
     }
-}
-
-/// Constant-time comparison to prevent timing attacks on token validation.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 #[cfg(test)]

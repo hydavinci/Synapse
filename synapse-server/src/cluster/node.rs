@@ -6,18 +6,7 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::proto;
-
-/// Constant-time comparison to prevent timing attacks.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
+use crate::util::constant_time_eq;
 
 /// Represents this node in a cluster.
 /// For v0.1, this is a single-node implementation with stubs for multi-node operations.

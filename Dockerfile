@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
     protobuf-compiler \
     libprotobuf-dev \
     cmake \
+    clang \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src/synapse

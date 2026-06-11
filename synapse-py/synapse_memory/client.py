@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import warnings
+import weakref
 from collections.abc import AsyncIterator
 from datetime import datetime
 from enum import Enum
@@ -296,6 +298,17 @@ class SynapseClient:
         self._connected = False
         self._active_transport = None
 
+    def __del__(self) -> None:
+        """Destructor that warns if the client was not properly closed."""
+        if self._connected:
+            warnings.warn(
+                f"SynapseClient(endpoint={self._endpoint!r}) was not closed. "
+                "Use 'async with SynapseClient(...) as client:' or call 'await client.close()' "
+                "to avoid resource leaks.",
+                ResourceWarning,
+                stacklevel=2,
+            )
+
     async def __aenter__(self) -> SynapseClient:
         await self.connect()
         return self
@@ -501,26 +514,11 @@ class SynapseClient:
             await self._connect_rest()
         # Start periodic gRPC probe if not already running
         if self._grpc_probe_task is None or self._grpc_probe_task.done():
-            self._grpc_probe_task = asyncio.create_task(self._probe_grpc_health())
-
-    async def _probe_grpc_health(self) -> None:
-        """Periodically probe gRPC health. If available, switch back and close circuit."""
-        while True:
-            await asyncio.sleep(self._probe_interval)
-            try:
-                # Try to re-establish gRPC
-                if self._grpc_channel:
-                    await self._grpc_channel.close()
-                    self._grpc_channel = None
-                await self._connect_grpc()
-                # gRPC is back!
-                await self._circuit_breaker.reset()
-                self._active_transport = TransportMode.GRPC
-                logger.info("gRPC health probe succeeded, switching back to gRPC")
-                return  # Stop probing
-            except Exception:
-                logger.debug("gRPC health probe failed, staying on REST")
-                continue
+            # Use weakref to self so the probe task doesn't prevent GC
+            weak_self = weakref.ref(self)
+            self._grpc_probe_task = asyncio.create_task(
+                _probe_grpc_health_weak(weak_self, self._probe_interval)
+            )
 
     async def _grpc_request(
         self,
@@ -625,3 +623,33 @@ class SynapseClient:
             return {}
 
         return response.json()  # type: ignore[no-any-return]
+
+
+async def _probe_grpc_health_weak(
+    weak_self: "weakref.ref[SynapseClient]",
+    probe_interval: float,
+) -> None:
+    """Periodically probe gRPC health using a weak reference to avoid preventing GC.
+
+    If the SynapseClient is garbage collected, this task exits cleanly.
+    """
+    while True:
+        await asyncio.sleep(probe_interval)
+        client = weak_self()
+        if client is None:
+            # Client was garbage collected, stop probing
+            return
+        try:
+            # Try to re-establish gRPC
+            if client._grpc_channel:
+                await client._grpc_channel.close()
+                client._grpc_channel = None
+            await client._connect_grpc()
+            # gRPC is back!
+            await client._circuit_breaker.reset()
+            client._active_transport = TransportMode.GRPC
+            logger.info("gRPC health probe succeeded, switching back to gRPC")
+            return  # Stop probing
+        except Exception:
+            logger.debug("gRPC health probe failed, staying on REST")
+            continue

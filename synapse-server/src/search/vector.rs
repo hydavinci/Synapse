@@ -37,6 +37,9 @@ impl Ord for ScoredItem {
     }
 }
 
+// Cached embedding entry: (record_id, embedding_vector).
+type EmbeddingCache = Vec<(String, Vec<f32>)>;
+
 /// In-memory vector search using cosine similarity with top-K heap optimization.
 ///
 /// When the corpus exceeds HNSW_THRESHOLD (10k records), an HNSW index is built
@@ -49,6 +52,9 @@ impl Ord for ScoredItem {
 pub struct VectorSearch {
     store: Arc<dyn StorageBackend>,
     hnsw: Arc<RwLock<Option<HnswIndex>>>,
+    /// In-memory cache of all embeddings for fast brute-force search.
+    /// Avoids hitting the database on every search when below HNSW threshold.
+    cache: Arc<RwLock<EmbeddingCache>>,
 }
 
 impl VectorSearch {
@@ -56,13 +62,22 @@ impl VectorSearch {
         Self {
             store,
             hnsw: Arc::new(RwLock::new(None)),
+            cache: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
     /// Initialize the HNSW index from stored embeddings if corpus is large enough.
+    /// Also populates the in-memory embedding cache.
     /// Should be called on startup after storage is ready.
     pub async fn init_index(&self) -> anyhow::Result<()> {
         let all_embeddings = self.store.get_all_embeddings().await?;
+
+        // Populate the cache
+        {
+            let mut cache = self.cache.write().await;
+            *cache = all_embeddings.clone();
+        }
+
         if all_embeddings.len() >= HNSW_THRESHOLD {
             info!(
                 count = all_embeddings.len(),
@@ -82,9 +97,15 @@ impl VectorSearch {
 
     /// Notify the index of a new embedding insertion.
     /// If HNSW is active, inserts into the index. If corpus just crossed the
-    /// threshold, builds the full index.
+    /// threshold, builds the full index. Also adds to the in-memory cache.
     #[allow(dead_code)]
     pub async fn notify_insert(&self, id: &str, embedding: &[f32]) -> anyhow::Result<()> {
+        // Add to cache
+        {
+            let mut cache = self.cache.write().await;
+            cache.push((id.to_string(), embedding.to_vec()));
+        }
+
         let hnsw_guard = self.hnsw.read().await;
         if let Some(ref index) = *hnsw_guard {
             // HNSW active — incremental insert
@@ -97,6 +118,25 @@ impl VectorSearch {
                 self.init_index().await?;
             }
         }
+        Ok(())
+    }
+
+    /// Notify the index that an embedding has been deleted.
+    /// Removes from both the HNSW index (if active) and the in-memory cache.
+    #[allow(dead_code)]
+    pub async fn notify_delete(&self, id: &str) -> anyhow::Result<()> {
+        // Remove from cache
+        {
+            let mut cache = self.cache.write().await;
+            cache.retain(|(cached_id, _)| cached_id != id);
+        }
+
+        // Remove from HNSW index if active
+        let hnsw_guard = self.hnsw.read().await;
+        if let Some(ref index) = *hnsw_guard {
+            index.remove(id).await;
+        }
+
         Ok(())
     }
 
@@ -139,11 +179,12 @@ impl VectorSearch {
         }
         drop(hnsw_guard);
 
-        // Fall back to brute-force scan
+        // Fall back to brute-force scan using cache
         self.brute_force_search(query_embedding, top_k, min_score).await
     }
 
     /// Brute-force cosine similarity search using a min-heap for top-K.
+    /// Uses the in-memory cache instead of hitting the database.
     async fn brute_force_search(
         &self,
         query_embedding: &[f32],
@@ -151,7 +192,7 @@ impl VectorSearch {
         min_score: f32,
     ) -> anyhow::Result<Vec<(String, f32)>> {
 
-        let all_embeddings = self.store.get_all_embeddings().await?;
+        let all_embeddings = self.cache.read().await;
 
         // Warn if corpus is very large (brute-force scan starts degrading)
         if all_embeddings.len() > 100_000 {
@@ -169,7 +210,7 @@ impl VectorSearch {
 
         let mut heap: BinaryHeap<ScoredItem> = BinaryHeap::with_capacity(top_k + 1);
 
-        for (id, emb) in &all_embeddings {
+        for (id, emb) in all_embeddings.iter() {
             if emb.len() != query_embedding.len() {
                 continue; // Dimension mismatch — skip
             }
