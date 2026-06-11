@@ -80,7 +80,7 @@ pub struct ClusterConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct StorageConfig {
-    /// Backend type: "memory" or "sqlite"
+    /// Backend type: "memory", "sqlite", or "postgres"
     #[serde(default = "default_backend")]
     pub backend: String,
 
@@ -90,6 +90,15 @@ pub struct StorageConfig {
     /// Path for sqlite database file (only used when backend="sqlite")
     #[serde(default = "default_sqlite_path")]
     pub sqlite_path: PathBuf,
+
+    /// PostgreSQL connection URL (only used when backend="postgres")
+    /// e.g. "postgres://user:pass@localhost/synapse"
+    #[serde(default)]
+    pub database_url: Option<String>,
+
+    /// Embedding vector dimension for pgvector (default: 1536)
+    #[serde(default = "default_embedding_dim")]
+    pub embedding_dim: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -149,6 +158,13 @@ fn default_sqlite_path() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("data/synapse.db"))
 }
 
+fn default_embedding_dim() -> usize {
+    std::env::var("SYNAPSE_EMBEDDING_DIM")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1536)
+}
+
 fn default_similarity_threshold() -> f32 {
     std::env::var("SYNAPSE_SIMILARITY_THRESHOLD")
         .ok()
@@ -201,6 +217,8 @@ impl Default for StorageConfig {
             backend: default_backend(),
             max_records: default_max_records(),
             sqlite_path: default_sqlite_path(),
+            database_url: None,
+            embedding_dim: default_embedding_dim(),
         }
     }
 }

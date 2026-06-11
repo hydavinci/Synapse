@@ -18,6 +18,8 @@ Two ways to use:
 """
 
 from .client import (
+    CircuitBreaker,
+    CircuitState,
     ConflictError,
     ConnectionError,
     NotFoundError,
@@ -42,7 +44,9 @@ from .models import (
     VectorClock,
     Visibility,
 )
+from .embeddings import BatchEmbeddingFn, EmbeddingFn
 from .scope import ScopeParseError, is_visible, parse_scope, serialize_scope
+
 from .utils import to_context
 
 __all__ = [
@@ -54,6 +58,12 @@ __all__ = [
     "ConnectionError",
     "NotFoundError",
     "ConflictError",
+    # Circuit breaker
+    "CircuitBreaker",
+    "CircuitState",
+    # Embedding types
+    "EmbeddingFn",
+    "BatchEmbeddingFn",
     # Models
     "MemoryRecord",
     "Scope",

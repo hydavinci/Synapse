@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 # Type alias for embedding functions
 EmbeddingFn = Callable[[str], list[float]]
 
+# Type alias for batch embedding functions
+BatchEmbeddingFn = Callable[[list[str]], list[list[float]]]
+
 
 def openai_embedding(
     model: str = "text-embedding-3-small",

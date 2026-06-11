@@ -1,7 +1,9 @@
 """Tests for LocalStore."""
 
 import tempfile
+import time
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -137,3 +139,126 @@ class TestLocalStoreExpiry:
         deleted = store.cleanup_expired()
         assert deleted == 1
         assert store.count() == 0
+
+
+class TestLocalStoreBatch:
+    """Test batch operations."""
+
+    def test_add_batch_basic(self, store: LocalStore) -> None:
+        """Test basic batch add without embeddings."""
+        records = [
+            {"content": "First record", "kind": MemoryKind.FACT},
+            {"content": "Second record", "kind": MemoryKind.PREFERENCE},
+            {"content": "Third record", "tags": ["important"]},
+        ]
+        results = store.add_batch(records)
+        assert len(results) == 3
+        assert results[0].content == "First record"
+        assert results[1].kind == MemoryKind.PREFERENCE
+        assert results[2].tags == ["important"]
+        assert store.count() == 3
+
+    def test_add_batch_empty(self, store: LocalStore) -> None:
+        """Test batch add with empty list."""
+        results = store.add_batch([])
+        assert results == []
+        assert store.count() == 0
+
+    def test_add_batch_with_mock_embedding(self, tmp_path: Path) -> None:
+        """Test batch add with a mock batch embedding function."""
+        mock_embed = MagicMock(return_value=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+        store = LocalStore(db_path=tmp_path / "test.db", batch_embedding_fn=mock_embed)
+
+        records = [
+            {"content": "Hello"},
+            {"content": "World"},
+        ]
+        results = store.add_batch(records)
+        assert len(results) == 2
+        mock_embed.assert_called_once_with(["Hello", "World"])
+
+    def test_add_batch_with_scope(self, store: LocalStore) -> None:
+        """Test batch add with scope."""
+        scope = Scope(org="acme", team="eng")
+        records = [
+            {"content": "Team fact 1", "scope": scope},
+            {"content": "Team fact 2", "scope": scope},
+        ]
+        results = store.add_batch(records)
+        assert all(r.scope.org == "acme" for r in results)
+        assert all(r.scope.team == "eng" for r in results)
+
+
+class TestLocalStoreSearchWithEmbedding:
+    """Test search with mock embedding function."""
+
+    def test_vector_search_with_mock_embedding(self, tmp_path: Path) -> None:
+        """Test that vector search works with a mock embedding function."""
+        import numpy as np
+
+        # Create deterministic embeddings based on content
+        def mock_embed(text: str) -> list[float]:
+            if "python" in text.lower():
+                return [1.0, 0.0, 0.0]
+            elif "rust" in text.lower():
+                return [0.0, 1.0, 0.0]
+            else:
+                return [0.0, 0.0, 1.0]
+
+        store = LocalStore(db_path=tmp_path / "test.db", embedding_fn=mock_embed)
+        store.add("Python is great")
+        store.add("Rust is fast")
+        store.add("JavaScript is everywhere")
+
+        results = store.search("Python programming")
+        assert len(results) >= 1
+        # The python record should score highest
+        assert "python" in results[0].record.content.lower()
+
+
+class TestLocalStoreFTS5:
+    """Test FTS5 full-text search."""
+
+    def test_fts5_search(self, store: LocalStore) -> None:
+        """Test that FTS5 search returns results."""
+        store.add("Machine learning is a subset of artificial intelligence")
+        store.add("Deep learning uses neural networks")
+        store.add("Cooking recipes for Italian food")
+
+        results = store.search("machine learning")
+        assert len(results) >= 1
+        assert any("machine" in r.record.content.lower() for r in results)
+
+    def test_fts5_no_match(self, store: LocalStore) -> None:
+        """Test FTS5 search with no matching terms."""
+        store.add("Hello world")
+        results = store.search("zzzznonexistent")
+        assert len(results) == 0
+
+
+class TestLocalStoreScopeFiltering:
+    """Test scope-based filtering."""
+
+    def test_search_with_scope_filter(self, store: LocalStore) -> None:
+        """Test that search respects scope filtering."""
+        scope_a = Scope(org="acme", user="alice")
+        scope_b = Scope(org="acme", user="bob")
+
+        store.add("Alice's secret", scope=scope_a)
+        store.add("Bob's data", scope=scope_b)
+        store.add("Alice's project notes", scope=scope_a)
+
+        results = store.search("secret", scope=Scope(org="acme", user="alice"))
+        assert all(r.record.scope.user == "alice" for r in results)
+
+    def test_list_with_scope_filter(self, store: LocalStore) -> None:
+        """Test listing with scope filter."""
+        scope_a = Scope(org="org1")
+        scope_b = Scope(org="org2")
+
+        store.add("Org1 data", scope=scope_a)
+        store.add("Org2 data", scope=scope_b)
+
+        results = store.list_memories(scope=Scope(org="org1"))
+        assert len(results) == 1
+        assert results[0].content == "Org1 data"

@@ -1,8 +1,10 @@
 mod api;
+#[cfg(feature = "cluster")]
 mod cluster;
 mod config;
 #[allow(dead_code)]
 mod conflict;
+mod metrics;
 mod scope;
 mod search;
 mod storage;
@@ -25,16 +27,46 @@ use tracing::info;
 mod auth;
 mod ratelimit;
 
-use api::grpc::{ClusterServiceImpl, ConflictServiceImpl, MemoryServiceImpl};
+#[cfg(feature = "cluster")]
+use api::grpc::ClusterServiceImpl;
+use api::grpc::{ConflictServiceImpl, MemoryServiceImpl};
 use auth::AuthInterceptor;
+#[cfg(feature = "cluster")]
 use cluster::ClusterNode;
 use config::Config;
 use conflict::ConflictDetector;
+#[cfg(feature = "cluster")]
 use proto::cluster_service_server::ClusterServiceServer;
 use proto::conflict_service_server::ConflictServiceServer;
 use proto::memory_service_server::MemoryServiceServer;
 use search::VectorSearch;
 use storage::{InMemoryStore, SqliteStore};
+
+/// Stub cluster node used when the cluster feature is disabled.
+#[cfg(not(feature = "cluster"))]
+mod cluster_stub {
+    use std::collections::HashMap;
+
+    /// Minimal stub that satisfies the API without actual cluster logic.
+    pub struct ClusterNode {
+        pub node_id: String,
+    }
+
+    impl ClusterNode {
+        pub fn new(node_id: String) -> Self {
+            Self { node_id }
+        }
+
+        pub async fn tick(&self) -> HashMap<String, u64> {
+            HashMap::from([(self.node_id.clone(), 0)])
+        }
+
+        pub async fn set_record_count(&self, _count: u64) {}
+    }
+}
+
+#[cfg(not(feature = "cluster"))]
+use cluster_stub::ClusterNode;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -56,6 +88,11 @@ async fn main() -> anyhow::Result<()> {
     info!("Node ID: {}", config.cluster.node_id);
     info!("Listen address: {}", config.listen_addr());
 
+    // Register and start Prometheus metrics
+    metrics::register_metrics();
+    tokio::spawn(metrics::start_metrics_server(9093));
+    info!("Prometheus metrics endpoint starting on :9093/metrics");
+
     // Initialize storage based on config
     let store: Arc<dyn storage::StorageBackend> = match config.storage.backend.as_str() {
         "sqlite" => {
@@ -75,8 +112,34 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Initialize search
+    // Set initial memory count metric
+    if let Ok(count) = store.count().await {
+        metrics::MEMORIES_TOTAL.set(count as i64);
+    }
+
+    // Initialize search with HNSW index
     let search = Arc::new(VectorSearch::new(store.clone()));
+    if let Err(e) = search.init_index().await {
+        tracing::warn!("Failed to initialize HNSW index (falling back to brute-force): {}", e);
+    }
+
+    // Background task: TTL cleanup every 5 minutes
+    {
+        let store_cleanup = store.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            interval.tick().await; // skip first immediate tick
+            loop {
+                interval.tick().await;
+                match store_cleanup.cleanup_expired().await {
+                    Ok(0) => {}
+                    Ok(n) => info!("TTL cleanup: removed {} expired records", n),
+                    Err(e) => tracing::error!("TTL cleanup failed: {}", e),
+                }
+            }
+        });
+        info!("TTL cleanup task scheduled (every 5 minutes)");
+    }
 
     // Initialize conflict detection
     let conflict_detector = Arc::new(ConflictDetector::new(config.conflict.similarity_threshold));
@@ -86,11 +149,14 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Initialize cluster node
+    #[cfg(feature = "cluster")]
     let cluster = Arc::new(ClusterNode::with_secret(
         config.cluster.node_id.clone(),
         config.listen_addr(),
         config.cluster_secret.clone(),
     ));
+    #[cfg(not(feature = "cluster"))]
+    let cluster = Arc::new(ClusterNode::new(config.cluster.node_id.clone()));
 
     // Event broadcast channel
     // CVE-7: Reduced buffer to 256 to limit memory usage from slow consumers.
@@ -105,6 +171,7 @@ async fn main() -> anyhow::Result<()> {
     health_reporter
         .set_serving::<ConflictServiceServer<ConflictServiceImpl>>()
         .await;
+    #[cfg(feature = "cluster")]
     health_reporter
         .set_serving::<ClusterServiceServer<ClusterServiceImpl>>()
         .await;
@@ -138,7 +205,6 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let conflict_service = ConflictServiceImpl::new(conflict_detector.clone(), store.clone());
-    let cluster_service = ClusterServiceImpl::new(cluster.clone());
 
     // Parse listen address
     let addr = config.listen_addr().parse()?;
@@ -174,7 +240,7 @@ async fn main() -> anyhow::Result<()> {
     // CVE-13: Global concurrency limit — max 256 concurrent requests
     let concurrency_limit = ConcurrencyLimitLayer::new(256);
 
-    server_builder
+    let router = server_builder
         .layer(concurrency_limit)
         .add_service(health_service)
         .add_service(MemoryServiceServer::with_interceptor(
@@ -184,13 +250,22 @@ async fn main() -> anyhow::Result<()> {
         .add_service(ConflictServiceServer::with_interceptor(
             conflict_service,
             auth.clone(),
-        ))
-        .add_service(ClusterServiceServer::with_interceptor(
+        ));
+
+    // Add cluster service only when feature is enabled
+    #[cfg(feature = "cluster")]
+    let router = {
+        let cluster_service = ClusterServiceImpl::new(cluster.clone());
+        router.add_service(ClusterServiceServer::with_interceptor(
             cluster_service,
             auth,
         ))
-        .serve_with_shutdown(addr, shutdown_signal())
-        .await?;
+    };
+
+    #[cfg(not(feature = "cluster"))]
+    let _ = auth; // suppress unused warning
+
+    router.serve_with_shutdown(addr, shutdown_signal()).await?;
 
     info!("Synapse server shut down gracefully");
     Ok(())

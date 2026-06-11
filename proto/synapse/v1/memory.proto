@@ -196,11 +196,13 @@ message ListRequest {
   uint32 offset = 3;
   repeated MemoryKind kinds = 4;
   repeated string tags = 5;
+  string cursor = 6;  // Optional: cursor-based pagination (overrides offset when set)
 }
 
 message ListResponse {
   repeated MemoryRecord records = 1;
   uint32 total = 2;
+  string next_cursor = 3;  // Empty when no more pages
 }
 
 message HistoryRequest {

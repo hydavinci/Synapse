@@ -7,8 +7,12 @@ use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
+#[cfg(feature = "cluster")]
 use crate::cluster::ClusterNode;
+#[cfg(not(feature = "cluster"))]
+use crate::cluster_stub::ClusterNode;
 use crate::conflict::{ConflictDetector, ConflictResolver};
+use crate::metrics;
 use crate::proto;
 use crate::ratelimit::ScopeRateLimiter;
 use crate::scope::ScopeResolver;
@@ -175,6 +179,12 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
         let count = self.store.count().await.unwrap_or(0);
         self.cluster.set_record_count(count).await;
 
+        // Update metrics
+        metrics::MEMORIES_TOTAL.set(count as i64);
+        metrics::REQUESTS_TOTAL
+            .with_label_values(&["add", "ok"])
+            .inc();
+
         // Emit event
         self.emit_event(proto::EventType::MemoryAdded, &stored);
 
@@ -247,6 +257,10 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
             .await
             .map_err(|e| internal_error("storage", e))?;
 
+        metrics::REQUESTS_TOTAL
+            .with_label_values(&["update", "ok"])
+            .inc();
+
         self.emit_event(proto::EventType::MemoryUpdated, &stored);
         info!(id = %req.id, "Memory record updated");
 
@@ -285,9 +299,13 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
             ));
         };
 
-        // Update cluster record count
+        // Update cluster record count and metrics
         let total = self.store.count().await.unwrap_or(0);
         self.cluster.set_record_count(total).await;
+        metrics::MEMORIES_TOTAL.set(total as i64);
+        metrics::REQUESTS_TOTAL
+            .with_label_values(&["forget", "ok"])
+            .inc();
 
         info!(count, "Memory records forgotten");
 
@@ -309,6 +327,10 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
             .map_err(|e| internal_error("storage", e))?
             .ok_or_else(|| Status::not_found(format!("Record '{}' not found", req.id)))?;
 
+        metrics::REQUESTS_TOTAL
+            .with_label_values(&["get", "ok"])
+            .inc();
+
         Ok(Response::new(proto::GetResponse {
             record: Some(record),
         }))
@@ -325,11 +347,13 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
 
         // If query_embedding is provided, use vector search
         let results: Vec<proto::SearchResult> = if !req.query_embedding.is_empty() {
+            let timer = metrics::SEARCH_DURATION_SECONDS.start_timer();
             let scored = self
                 .search
                 .search(&req.query_embedding, top_k, min_score)
                 .await
                 .map_err(|e| internal_error("search", e))?;
+            timer.observe_duration();
 
             let ids: Vec<String> = scored.iter().map(|(id, _)| id.clone()).collect();
             let records = self
@@ -421,6 +445,10 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
                 .collect()
         };
 
+        metrics::REQUESTS_TOTAL
+            .with_label_values(&["search", "ok"])
+            .inc();
+
         let total = results.len() as u32;
         Ok(Response::new(proto::SearchResponse { results, total }))
     }
@@ -432,11 +460,29 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
         let req = request.into_inner();
         let limit = if req.limit == 0 { 50 } else { req.limit };
 
-        let (records, total) = self
-            .store
-            .list(req.scope.as_ref(), &req.kinds, &req.tags, limit, req.offset)
-            .await
-            .map_err(|e| internal_error("storage", e))?;
+        // Use cursor-based pagination when cursor is provided, otherwise offset
+        let (records, total, next_cursor) = if !req.cursor.is_empty() {
+            let (recs, cursor) = self
+                .store
+                .list_with_cursor(
+                    req.scope.as_ref(),
+                    &req.kinds,
+                    &req.tags,
+                    limit,
+                    Some(&req.cursor),
+                )
+                .await
+                .map_err(|e| internal_error("storage", e))?;
+            let total = recs.len() as u32; // cursor mode doesn't compute total
+            (recs, total, cursor.unwrap_or_default())
+        } else {
+            let (recs, total) = self
+                .store
+                .list(req.scope.as_ref(), &req.kinds, &req.tags, limit, req.offset)
+                .await
+                .map_err(|e| internal_error("storage", e))?;
+            (recs, total, String::new())
+        };
 
         // Apply scope visibility
         // CVE-4 fix: scope=None means only PUBLIC records are visible
@@ -454,9 +500,14 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
                 .collect()
         };
 
+        metrics::REQUESTS_TOTAL
+            .with_label_values(&["list", "ok"])
+            .inc();
+
         Ok(Response::new(proto::ListResponse {
             records: visible,
             total,
+            next_cursor,
         }))
     }
 
@@ -471,6 +522,10 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
             .history(&req.id)
             .await
             .map_err(|e| internal_error("storage", e))?;
+
+        metrics::REQUESTS_TOTAL
+            .with_label_values(&["history", "ok"])
+            .inc();
 
         Ok(Response::new(proto::HistoryResponse { versions }))
     }
@@ -578,9 +633,10 @@ impl proto::memory_service_server::MemoryService for MemoryServiceImpl {
             }
         }
 
-        // Update cluster record count
+        // Update cluster record count and metrics
         let count = self.store.count().await.unwrap_or(0);
         self.cluster.set_record_count(count).await;
+        metrics::MEMORIES_TOTAL.set(count as i64);
 
         Ok(Response::new(proto::ImportResponse {
             imported_count: imported,
@@ -671,6 +727,8 @@ impl proto::conflict_service_server::ConflictService for ConflictServiceImpl {
 
         let updated_conflict = self.conflict_detector.get_conflict(&req.conflict_id).await;
 
+        metrics::CONFLICTS_TOTAL.inc();
+
         Ok(Response::new(proto::ResolveConflictResponse {
             conflict: updated_conflict,
             resolved_record: Some(resolved_record),
@@ -687,16 +745,19 @@ impl proto::conflict_service_server::ConflictService for ConflictServiceImpl {
 }
 
 /// gRPC implementation of ClusterService.
+#[cfg(feature = "cluster")]
 pub struct ClusterServiceImpl {
     cluster: Arc<ClusterNode>,
 }
 
+#[cfg(feature = "cluster")]
 impl ClusterServiceImpl {
     pub fn new(cluster: Arc<ClusterNode>) -> Self {
         Self { cluster }
     }
 }
 
+#[cfg(feature = "cluster")]
 #[tonic::async_trait]
 impl proto::cluster_service_server::ClusterService for ClusterServiceImpl {
     async fn join(
@@ -720,7 +781,6 @@ impl proto::cluster_service_server::ClusterService for ClusterServiceImpl {
         }
 
         // handle_join validates cluster secret internally
-        // TODO: Pass secret from request metadata once proto supports it
         match self
             .cluster
             .handle_join(&req.node_id, &req.address, None)

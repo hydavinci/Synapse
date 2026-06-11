@@ -247,6 +247,120 @@ impl StorageBackend for InMemoryStore {
         let state = self.state.read().await;
         Ok(state.records.len() as u64)
     }
+
+    async fn list_with_cursor(
+        &self,
+        scope: Option<&proto::Scope>,
+        kinds: &[i32],
+        tags: &[String],
+        limit: u32,
+        cursor: Option<&str>,
+    ) -> Result<(Vec<proto::MemoryRecord>, Option<String>)> {
+        let state = self.state.read().await;
+
+        // Parse cursor
+        let (cursor_secs, cursor_id) = if let Some(c) = cursor {
+            if let Some((s, id)) = c.split_once(':') {
+                (s.parse::<i64>().ok(), Some(id.to_string()))
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
+        let mut matching: Vec<&proto::MemoryRecord> = state
+            .records
+            .values()
+            .filter(|r| {
+                // Cursor filter
+                if let (Some(c_secs), Some(ref c_id)) = (cursor_secs, &cursor_id) {
+                    let r_secs = r.created_at.as_ref().map(|t| t.seconds).unwrap_or(0);
+                    if r_secs > c_secs || (r_secs == c_secs && r.id >= *c_id) {
+                        return false;
+                    }
+                }
+                // Scope filter
+                if let Some(s) = scope {
+                    if let Some(ref rs) = r.scope {
+                        if !scope_matches(rs, s) {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+                // Kind filter
+                if !kinds.is_empty() && !kinds.contains(&r.kind) {
+                    return false;
+                }
+                // Tag filter
+                if !tags.is_empty() {
+                    for tag in tags {
+                        if !r.tags.contains(tag) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            })
+            .collect();
+
+        matching.sort_by(|a, b| {
+            let ta = a.created_at.as_ref().map(|t| t.seconds).unwrap_or(0);
+            let tb = b.created_at.as_ref().map(|t| t.seconds).unwrap_or(0);
+            tb.cmp(&ta).then_with(|| b.id.cmp(&a.id))
+        });
+
+        let fetch_limit = (limit + 1) as usize;
+        let results: Vec<proto::MemoryRecord> =
+            matching.iter().take(fetch_limit).cloned().cloned().collect();
+
+        let (records, next_cursor) = if results.len() > limit as usize {
+            let records: Vec<proto::MemoryRecord> = results.into_iter().take(limit as usize).collect();
+            let last = records.last().map(|r| {
+                let secs = r.created_at.as_ref().map(|t| t.seconds).unwrap_or(0);
+                format!("{}:{}", secs, r.id)
+            });
+            (records, last)
+        } else {
+            (results, None)
+        };
+
+        Ok((records, next_cursor))
+    }
+
+    async fn cleanup_expired(&self) -> Result<u64> {
+        let mut state = self.state.write().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let now_secs = now.as_secs() as i64;
+
+        let to_remove: Vec<String> = state
+            .records
+            .values()
+            .filter(|r| {
+                if let Some(ref expires) = r.expires_at {
+                    expires.seconds > 0 && expires.seconds <= now_secs
+                } else {
+                    false
+                }
+            })
+            .map(|r| r.id.clone())
+            .collect();
+
+        let count = to_remove.len() as u64;
+        for id in &to_remove {
+            if let Some(rec) = state.records.remove(id) {
+                let time_key = Self::timestamp_nanos(&rec.created_at);
+                state.time_index.remove(&(time_key, id.clone()));
+            }
+            state.history.remove(id);
+        }
+
+        Ok(count)
+    }
 }
 
 /// Check if a record's scope matches a query scope.

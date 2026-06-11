@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator
 from datetime import datetime
+from enum import Enum
 from typing import Any, Optional
 
 import httpx
@@ -57,6 +59,93 @@ class NotFoundError(SynapseError):
 class ConflictError(SynapseError):
     """Raised when a conflict is detected and policy is REJECT."""
     pass
+
+
+class CircuitState(str, Enum):
+    """Circuit breaker states."""
+    CLOSED = "closed"      # Normal operation, requests flow through
+    OPEN = "open"          # Circuit tripped, fail fast
+    HALF_OPEN = "half_open"  # Testing if service is back
+
+
+class CircuitBreaker:
+    """Circuit breaker pattern for fault tolerance.
+
+    States:
+    - CLOSED: Normal operation. Tracks consecutive failures.
+    - OPEN: Fail fast. After timeout, moves to HALF_OPEN.
+    - HALF_OPEN: Allows one probe request. Success -> CLOSED, failure -> OPEN.
+
+    Args:
+        failure_threshold: Number of consecutive failures before opening circuit.
+        recovery_timeout: Seconds to wait before moving from OPEN to HALF_OPEN.
+    """
+
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        recovery_timeout: float = 30.0,
+    ) -> None:
+        self._failure_threshold = failure_threshold
+        self._recovery_timeout = recovery_timeout
+        self._state = CircuitState.CLOSED
+        self._consecutive_failures = 0
+        self._last_failure_time: float = 0.0
+        self._lock = asyncio.Lock()
+
+    @property
+    def state(self) -> CircuitState:
+        """Get current circuit state, considering time-based transitions."""
+        if self._state == CircuitState.OPEN:
+            # Check if recovery timeout has elapsed
+            if time.time() - self._last_failure_time >= self._recovery_timeout:
+                return CircuitState.HALF_OPEN
+        return self._state
+
+    @property
+    def consecutive_failures(self) -> int:
+        return self._consecutive_failures
+
+    async def allow_request(self) -> bool:
+        """Check if a request is allowed through the circuit.
+
+        Returns:
+            True if the request should proceed, False if it should fail fast.
+        """
+        async with self._lock:
+            current_state = self.state
+            if current_state == CircuitState.CLOSED:
+                return True
+            elif current_state == CircuitState.HALF_OPEN:
+                # Allow one probe request
+                return True
+            else:
+                # OPEN — fail fast
+                return False
+
+    async def record_success(self) -> None:
+        """Record a successful request."""
+        async with self._lock:
+            self._consecutive_failures = 0
+            self._state = CircuitState.CLOSED
+
+    async def record_failure(self) -> None:
+        """Record a failed request."""
+        async with self._lock:
+            self._consecutive_failures += 1
+            self._last_failure_time = time.time()
+            if self._state == CircuitState.HALF_OPEN:
+                # Probe failed, reopen
+                self._state = CircuitState.OPEN
+            elif self._consecutive_failures >= self._failure_threshold:
+                self._state = CircuitState.OPEN
+
+    async def reset(self) -> None:
+        """Reset the circuit breaker to CLOSED state."""
+        async with self._lock:
+            self._state = CircuitState.CLOSED
+            self._consecutive_failures = 0
+            self._last_failure_time = 0.0
 
 
 class TransportMode:
@@ -110,6 +199,13 @@ class SynapseClient:
         # Active transport mode
         self._active_transport: Optional[str] = None
         self._connected = False
+
+        # Circuit breaker for gRPC transport
+        self._circuit_breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=30.0)
+
+        # gRPC health probe task
+        self._grpc_probe_task: Optional[asyncio.Task] = None
+        self._probe_interval = 60.0  # Probe gRPC health every 60s when using REST fallback
 
     async def connect(self) -> None:
         """Establish connection to the Synapse server."""
@@ -184,6 +280,13 @@ class SynapseClient:
 
     async def close(self) -> None:
         """Close all connections."""
+        if self._grpc_probe_task and not self._grpc_probe_task.done():
+            self._grpc_probe_task.cancel()
+            try:
+                await self._grpc_probe_task
+            except asyncio.CancelledError:
+                pass
+            self._grpc_probe_task = None
         if self._http_client:
             await self._http_client.aclose()
             self._http_client = None
@@ -327,15 +430,26 @@ class SynapseClient:
         json: Optional[dict[str, Any]] = None,
         params: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        """Route request to the active transport with retry logic."""
+        """Route request to the active transport with retry logic and circuit breaker."""
         if not self._connected:
             await self.connect()
 
         last_error: Optional[Exception] = None
         for attempt in range(self._max_retries + 1):
             try:
-                if self._active_transport == TransportMode.GRPC:
-                    return await self._grpc_request(method, path, json=json, params=params)
+                # Determine transport: check circuit breaker for gRPC
+                use_transport = self._active_transport
+                if use_transport == TransportMode.GRPC:
+                    if not await self._circuit_breaker.allow_request():
+                        # Circuit is open — fall back to REST
+                        logger.warning("Circuit breaker OPEN for gRPC, falling back to REST")
+                        await self._ensure_rest_fallback()
+                        use_transport = TransportMode.REST
+
+                if use_transport == TransportMode.GRPC:
+                    result = await self._grpc_request(method, path, json=json, params=params)
+                    await self._circuit_breaker.record_success()
+                    return result
                 else:
                     return await self._rest_request(method, path, json=json, params=params)
             except (httpx.HTTPStatusError,) as e:
@@ -349,9 +463,24 @@ class SynapseClient:
                 last_error = e
             except (httpx.ConnectError, httpx.TimeoutException) as e:
                 last_error = e
+                # Record failure for circuit breaker if using gRPC
+                if self._active_transport == TransportMode.GRPC:
+                    await self._circuit_breaker.record_failure()
+                    # If circuit just opened, try REST fallback immediately
+                    if self._circuit_breaker.state == CircuitState.OPEN:
+                        logger.warning("Circuit breaker tripped, switching to REST fallback")
+                        await self._ensure_rest_fallback()
+                        # Retry this attempt on REST
+                        try:
+                            return await self._rest_request(method, path, json=json, params=params)
+                        except Exception as rest_e:
+                            last_error = rest_e
             except Exception as e:
                 if "StatusCode.NOT_FOUND" in str(e):
                     raise NotFoundError(f"Not found: {path}") from e
+                # Record gRPC failures
+                if self._active_transport == TransportMode.GRPC:
+                    await self._circuit_breaker.record_failure()
                 raise SynapseError(f"Unexpected error: {e}") from e
 
             if attempt < self._max_retries:
@@ -365,6 +494,33 @@ class SynapseClient:
         raise ConnectionError(
             f"Failed after {self._max_retries + 1} attempts: {last_error}"
         ) from last_error
+
+    async def _ensure_rest_fallback(self) -> None:
+        """Ensure REST client is available for fallback and start gRPC probe."""
+        if not self._http_client:
+            await self._connect_rest()
+        # Start periodic gRPC probe if not already running
+        if self._grpc_probe_task is None or self._grpc_probe_task.done():
+            self._grpc_probe_task = asyncio.create_task(self._probe_grpc_health())
+
+    async def _probe_grpc_health(self) -> None:
+        """Periodically probe gRPC health. If available, switch back and close circuit."""
+        while True:
+            await asyncio.sleep(self._probe_interval)
+            try:
+                # Try to re-establish gRPC
+                if self._grpc_channel:
+                    await self._grpc_channel.close()
+                    self._grpc_channel = None
+                await self._connect_grpc()
+                # gRPC is back!
+                await self._circuit_breaker.reset()
+                self._active_transport = TransportMode.GRPC
+                logger.info("gRPC health probe succeeded, switching back to gRPC")
+                return  # Stop probing
+            except Exception:
+                logger.debug("gRPC health probe failed, staying on REST")
+                continue
 
     async def _grpc_request(
         self,

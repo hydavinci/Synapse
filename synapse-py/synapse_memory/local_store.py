@@ -8,6 +8,8 @@ remote endpoint is configured.
 from __future__ import annotations
 
 import json
+import logging
+import queue
 import sqlite3
 import threading
 import time
@@ -16,7 +18,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .embeddings import BatchEmbeddingFn
 from .models import MemoryKind, MemoryRecord, Scope, SearchResult, Visibility
+
+logger = logging.getLogger(__name__)
 
 
 def _default_db_path() -> Path:
@@ -39,9 +44,13 @@ class LocalStore:
         self,
         db_path: Optional[Path] = None,
         embedding_fn=None,
+        async_embed: bool = False,
+        batch_embedding_fn: Optional[BatchEmbeddingFn] = None,
     ) -> None:
         self._db_path = db_path or _default_db_path()
         self._embedding_fn = embedding_fn
+        self._batch_embedding_fn = batch_embedding_fn
+        self._async_embed = async_embed
         self._lock = threading.RLock()  # CVE-14: RLock for read+write consistency
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -49,6 +58,13 @@ class LocalStore:
         self._conn.execute("PRAGMA busy_timeout=5000")  # Wait up to 5s on contention
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
+
+        # Async embedding support: pending queue + background worker
+        self._pending_embeddings: queue.Queue[str] = queue.Queue()
+        self._embed_worker_stop = threading.Event()
+        self._embed_worker_thread: Optional[threading.Thread] = None
+        if self._async_embed and self._embedding_fn:
+            self._start_embed_worker()
 
     def _init_schema(self) -> None:
         self._conn.executescript("""
@@ -133,6 +149,40 @@ class LocalStore:
             )
             self._conn.commit()
 
+    def _start_embed_worker(self) -> None:
+        """Start background thread that processes pending embeddings."""
+        def _worker():
+            while not self._embed_worker_stop.is_set():
+                try:
+                    record_id = self._pending_embeddings.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+                try:
+                    # Fetch current content
+                    row = self._conn.execute(
+                        "SELECT content FROM memories WHERE id = ?", (record_id,)
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    content = row["content"]
+                    embedding = self._embedding_fn(content)
+                    embedding_blob = self._encode_embedding(embedding)
+                    with self._lock:
+                        self._conn.execute(
+                            "UPDATE memories SET embedding = ? WHERE id = ?",
+                            (embedding_blob, record_id),
+                        )
+                        self._conn.commit()
+                except Exception as e:
+                    logger.warning("Async embedding failed for %s: %s", record_id, e)
+                finally:
+                    self._pending_embeddings.task_done()
+
+        self._embed_worker_thread = threading.Thread(
+            target=_worker, daemon=True, name="synapse-embed-worker"
+        )
+        self._embed_worker_thread.start()
+
     def add(
         self,
         content: str,
@@ -150,10 +200,10 @@ class LocalStore:
         kind = kind or MemoryKind.FACT
         tags = tags or []
 
-        # Compute embedding if function provided
+        # Compute embedding if function provided (unless async mode)
         embedding: Optional[list[float]] = None
         embedding_blob: Optional[bytes] = None
-        if self._embedding_fn:
+        if self._embedding_fn and not self._async_embed:
             embedding = self._embedding_fn(content)
             embedding_blob = self._encode_embedding(embedding)
 
@@ -187,6 +237,10 @@ class LocalStore:
             )
             self._conn.commit()
 
+        # If async embed is enabled, queue embedding computation
+        if self._async_embed and self._embedding_fn:
+            self._pending_embeddings.put(record_id)
+
         return MemoryRecord(
             id=record_id,
             content=content,
@@ -198,6 +252,118 @@ class LocalStore:
             created_at=now,
             updated_at=now,
         )
+
+    def add_batch(
+        self,
+        records: list[dict],
+    ) -> list[MemoryRecord]:
+        """Store multiple memory records, computing embeddings in a single batch call.
+
+        Each record dict may contain: content (required), scope, kind, tags, confidence, metadata.
+        If a batch_embedding_fn is configured, embeddings are computed in one batch call.
+        Otherwise falls back to the single embedding_fn per record.
+
+        Args:
+            records: List of dicts with record data.
+
+        Returns:
+            List of created MemoryRecord objects.
+        """
+        if not records:
+            return []
+
+        now_ts = time.time()
+        now = datetime.fromtimestamp(now_ts, tz=timezone.utc)
+
+        # Prepare record data
+        prepared = []
+        contents = []
+        for rec in records:
+            record_id = str(uuid.uuid4())
+            content = rec["content"]
+            scope = rec.get("scope") or Scope()
+            kind = rec.get("kind") or MemoryKind.FACT
+            tags = rec.get("tags") or []
+            confidence = rec.get("confidence", 1.0)
+            metadata = rec.get("metadata") or {}
+            prepared.append({
+                "id": record_id,
+                "content": content,
+                "scope": scope,
+                "kind": kind,
+                "tags": tags,
+                "confidence": confidence,
+                "metadata": metadata,
+            })
+            contents.append(content)
+
+        # Compute embeddings in batch
+        embeddings: list[Optional[list[float]]] = [None] * len(prepared)
+        if self._batch_embedding_fn:
+            try:
+                embeddings = self._batch_embedding_fn(contents)
+            except Exception as e:
+                logger.warning("Batch embedding failed, falling back to individual: %s", e)
+                if self._embedding_fn:
+                    embeddings = [self._embedding_fn(c) for c in contents]
+        elif self._embedding_fn and not self._async_embed:
+            embeddings = [self._embedding_fn(c) for c in contents]
+
+        # Insert all records
+        result_records = []
+        with self._lock:
+            for i, rec in enumerate(prepared):
+                embedding_blob = None
+                if embeddings[i] is not None:
+                    embedding_blob = self._encode_embedding(embeddings[i])
+
+                scope = rec["scope"]
+                self._conn.execute(
+                    """INSERT INTO memories
+                       (id, content, embedding, scope_org, scope_team, scope_user, scope_agent,
+                        scope_visibility, kind, confidence, tags, source, version,
+                        created_at, updated_at, accessed_at, expires_at, metadata)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        rec["id"],
+                        rec["content"],
+                        embedding_blob,
+                        scope.org or "",
+                        scope.team or "",
+                        scope.user or "",
+                        scope.agent or "",
+                        scope.visibility.value if scope.visibility else Visibility.PRIVATE.value,
+                        rec["kind"].value,
+                        rec["confidence"],
+                        json.dumps(rec["tags"]),
+                        "",
+                        1,
+                        now_ts,
+                        now_ts,
+                        now_ts,
+                        None,
+                        json.dumps(rec["metadata"]),
+                    ),
+                )
+                result_records.append(MemoryRecord(
+                    id=rec["id"],
+                    content=rec["content"],
+                    scope=scope,
+                    kind=rec["kind"],
+                    confidence=rec["confidence"],
+                    tags=rec["tags"],
+                    version=1,
+                    created_at=now,
+                    updated_at=now,
+                ))
+            self._conn.commit()
+
+        # Queue async embeddings if needed
+        if self._async_embed and self._embedding_fn:
+            for rec in prepared:
+                self._pending_embeddings.put(rec["id"])
+
+        return result_records
 
     def get(self, record_id: str) -> Optional[MemoryRecord]:
         """Get a single record by ID."""
@@ -637,6 +803,10 @@ class LocalStore:
         if hasattr(self, '_cleanup_stop_event'):
             self._cleanup_stop_event.set()
             self._cleanup_thread.join(timeout=2)
+        # Stop embed worker
+        if self._embed_worker_thread is not None:
+            self._embed_worker_stop.set()
+            self._embed_worker_thread.join(timeout=2)
         self._conn.close()
 
     def cleanup_expired(self) -> int:

@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+cluster = []
+postgres = ["sqlx", "pgvector", "chrono"]
+
 [dependencies]
 # gRPC / Protobuf
 tonic = { version = "0.12", features = ["tls"] }
@@ -37,6 +42,21 @@ async-trait = "0.1"
 
 # SQLite persistent storage
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+# PostgreSQL + pgvector (optional, behind "postgres" feature)
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "macros", "chrono"], optional = true }
+pgvector = { version = "0.4", features = ["sqlx"], optional = true }
+chrono = { version = "0.4", optional = true }
+
+# HNSW vector index
+usearch = "2"
+
+# Metrics
+prometheus = "0.13"
+lazy_static = "1"
+hyper = { version = "1", features = ["server", "http1"] }
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["tokio"] }
 
 [build-dependencies]
 tonic-build = "0.12"

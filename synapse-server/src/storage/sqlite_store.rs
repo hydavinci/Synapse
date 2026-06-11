@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -10,12 +11,21 @@ use tokio::sync::Mutex;
 use crate::proto;
 use crate::storage::traits::StorageBackend;
 
-/// SQLite persistent storage backend.
+/// Number of read connections in the pool.
+const READ_POOL_SIZE: usize = 4;
+
+/// SQLite persistent storage backend with read/write separation.
 ///
-/// Uses rusqlite with WAL mode for concurrent reads. All writes are serialized
-/// through a Mutex since SQLite allows only one writer at a time.
+/// Uses a single write connection (serialized through Mutex) and a pool of
+/// read connections with round-robin selection for concurrent reads.
+/// All connections use WAL mode for optimal read concurrency.
 pub struct SqliteStore {
-    conn: Arc<Mutex<Connection>>,
+    /// Dedicated write connection (single writer, as SQLite requires)
+    write_conn: Arc<Mutex<Connection>>,
+    /// Pool of read connections for concurrent read operations
+    read_pool: Vec<Arc<Mutex<Connection>>>,
+    /// Round-robin counter for read connection selection
+    read_counter: AtomicUsize,
 }
 
 impl SqliteStore {
@@ -24,7 +34,29 @@ impl SqliteStore {
             std::fs::create_dir_all(parent)?;
         }
 
-        let conn = Connection::open(&path)?;
+        // Create write connection
+        let write_conn = Self::open_connection(&path, true)?;
+
+        // Create read pool
+        let mut read_pool = Vec::with_capacity(READ_POOL_SIZE);
+        for _ in 0..READ_POOL_SIZE {
+            let conn = Self::open_connection(&path, false)?;
+            read_pool.push(Arc::new(Mutex::new(conn)));
+        }
+
+        let store = Self {
+            write_conn: Arc::new(Mutex::new(write_conn)),
+            read_pool,
+            read_counter: AtomicUsize::new(0),
+        };
+        store.init_schema_sync()?;
+        Ok(store)
+    }
+
+    /// Open a SQLite connection with proper pragmas.
+    /// `is_writer` determines if this is the write connection.
+    fn open_connection(path: &PathBuf, is_writer: bool) -> Result<Connection> {
+        let conn = Connection::open(path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA busy_timeout=5000;
@@ -32,16 +64,23 @@ impl SqliteStore {
              PRAGMA foreign_keys=ON;",
         )?;
 
-        let store = Self {
-            conn: Arc::new(Mutex::new(conn)),
-        };
-        store.init_schema_sync()?;
-        Ok(store)
+        if !is_writer {
+            // Read connections can use a more relaxed isolation
+            conn.execute_batch("PRAGMA query_only=ON;")?;
+        }
+
+        Ok(conn)
+    }
+
+    /// Get a read connection from the pool using round-robin.
+    fn get_read_conn(&self) -> &Arc<Mutex<Connection>> {
+        let idx = self.read_counter.fetch_add(1, AtomicOrdering::Relaxed) % READ_POOL_SIZE;
+        &self.read_pool[idx]
     }
 
     fn init_schema_sync(&self) -> Result<()> {
         // We need blocking access here since this is called from new()
-        let conn = self.conn.blocking_lock();
+        let conn = self.write_conn.blocking_lock();
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS memories (
                 id TEXT PRIMARY KEY,
@@ -85,7 +124,8 @@ impl SqliteStore {
             CREATE INDEX IF NOT EXISTS idx_memories_scope
                 ON memories(scope_org, scope_team, scope_user, scope_agent);
             CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind);
-            CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at_secs);",
+            CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at_secs);
+            CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at_secs);",
         )?;
         Ok(())
     }
@@ -171,7 +211,7 @@ impl SqliteStore {
 #[async_trait]
 impl StorageBackend for SqliteStore {
     async fn add(&self, record: proto::MemoryRecord) -> Result<proto::MemoryRecord> {
-        let conn = self.conn.lock().await;
+        let conn = self.write_conn.lock().await;
 
         let scope = record.scope.as_ref().cloned().unwrap_or_default();
         let source = record.source.as_ref().cloned().unwrap_or_default();
@@ -249,7 +289,7 @@ impl StorageBackend for SqliteStore {
     }
 
     async fn get(&self, id: &str) -> Result<Option<proto::MemoryRecord>> {
-        let conn = self.conn.lock().await;
+        let conn = self.get_read_conn().lock().await;
         let mut stmt = conn.prepare("SELECT * FROM memories WHERE id = ?1")?;
         let result = stmt
             .query_row(params![id], Self::row_to_record)
@@ -259,7 +299,7 @@ impl StorageBackend for SqliteStore {
     }
 
     async fn update(&self, record: proto::MemoryRecord) -> Result<proto::MemoryRecord> {
-        let conn = self.conn.lock().await;
+        let conn = self.write_conn.lock().await;
 
         let scope = record.scope.as_ref().cloned().unwrap_or_default();
         let (updated_secs, updated_nanos) = Self::proto_to_ts(&record.updated_at);
@@ -317,7 +357,7 @@ impl StorageBackend for SqliteStore {
     }
 
     async fn delete(&self, id: &str) -> Result<bool> {
-        let conn = self.conn.lock().await;
+        let conn = self.write_conn.lock().await;
         let rows = conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
         conn.execute("DELETE FROM memory_history WHERE id = ?1", params![id])?;
         Ok(rows > 0)
@@ -328,7 +368,7 @@ impl StorageBackend for SqliteStore {
         scope: &proto::Scope,
         before: Option<Timestamp>,
     ) -> Result<u64> {
-        let conn = self.conn.lock().await;
+        let conn = self.write_conn.lock().await;
 
         let mut conditions = Vec::new();
         let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -376,7 +416,7 @@ impl StorageBackend for SqliteStore {
         limit: u32,
         offset: u32,
     ) -> Result<(Vec<proto::MemoryRecord>, u32)> {
-        let conn = self.conn.lock().await;
+        let conn = self.get_read_conn().lock().await;
 
         let mut conditions: Vec<String> = vec!["1=1".to_string()];
         let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -442,8 +482,106 @@ impl StorageBackend for SqliteStore {
         Ok((rows, total))
     }
 
+    async fn list_with_cursor(
+        &self,
+        scope: Option<&proto::Scope>,
+        kinds: &[i32],
+        tags: &[String],
+        limit: u32,
+        cursor: Option<&str>,
+    ) -> Result<(Vec<proto::MemoryRecord>, Option<String>)> {
+        let conn = self.get_read_conn().lock().await;
+
+        let mut conditions: Vec<String> = vec!["1=1".to_string()];
+        let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        // Parse cursor: format is "created_at_secs:id"
+        if let Some(cursor_str) = cursor {
+            if let Some((secs_str, cursor_id)) = cursor_str.split_once(':') {
+                if let Ok(secs) = secs_str.parse::<i64>() {
+                    // For descending order: get records older than cursor
+                    conditions.push(
+                        "(created_at_secs < ? OR (created_at_secs = ? AND id < ?))".to_string(),
+                    );
+                    param_values.push(Box::new(secs));
+                    param_values.push(Box::new(secs));
+                    param_values.push(Box::new(cursor_id.to_string()));
+                }
+            }
+        }
+
+        if let Some(s) = scope {
+            if !s.org.is_empty() {
+                conditions.push("scope_org = ?".to_string());
+                param_values.push(Box::new(s.org.clone()));
+            }
+            if !s.team.is_empty() {
+                conditions.push("scope_team = ?".to_string());
+                param_values.push(Box::new(s.team.clone()));
+            }
+            if !s.user.is_empty() {
+                conditions.push("scope_user = ?".to_string());
+                param_values.push(Box::new(s.user.clone()));
+            }
+            if !s.agent.is_empty() {
+                conditions.push("scope_agent = ?".to_string());
+                param_values.push(Box::new(s.agent.clone()));
+            }
+        }
+
+        if !kinds.is_empty() {
+            let placeholders: Vec<&str> = kinds.iter().map(|_| "?").collect();
+            conditions.push(format!("kind IN ({})", placeholders.join(",")));
+            for k in kinds {
+                param_values.push(Box::new(*k));
+            }
+        }
+
+        let where_clause = conditions.join(" AND ");
+
+        // Fetch one extra to determine if there's a next page
+        let fetch_limit = limit + 1;
+        let sql = format!(
+            "SELECT * FROM memories WHERE {} ORDER BY created_at_secs DESC, id DESC LIMIT ?",
+            where_clause
+        );
+        param_values.push(Box::new(fetch_limit));
+        let params_ref: Vec<&dyn rusqlite::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows: Vec<proto::MemoryRecord> = stmt
+            .query_map(params_ref.as_slice(), Self::row_to_record)?
+            .filter_map(|r| r.ok())
+            .filter(|r| {
+                if tags.is_empty() {
+                    return true;
+                }
+                tags.iter().all(|t| r.tags.contains(t))
+            })
+            .collect();
+
+        // Determine next_cursor
+        let next_cursor = if rows.len() > limit as usize {
+            rows.truncate(limit as usize);
+            // Build cursor from last returned record
+            rows.last().map(|r| {
+                let secs = r
+                    .created_at
+                    .as_ref()
+                    .map(|t| t.seconds)
+                    .unwrap_or(0);
+                format!("{}:{}", secs, r.id)
+            })
+        } else {
+            None
+        };
+
+        Ok((rows, next_cursor))
+    }
+
     async fn history(&self, id: &str) -> Result<Vec<proto::MemoryRecord>> {
-        let conn = self.conn.lock().await;
+        let conn = self.get_read_conn().lock().await;
         let mut stmt = conn.prepare(
             "SELECT h.id, h.content, h.version, h.tags, h.kind,
                     h.updated_at_secs, h.updated_at_nanos
@@ -472,7 +610,7 @@ impl StorageBackend for SqliteStore {
     }
 
     async fn store_version(&self, record: &proto::MemoryRecord) -> Result<()> {
-        let conn = self.conn.lock().await;
+        let conn = self.write_conn.lock().await;
         let (updated_secs, updated_nanos) = Self::proto_to_ts(&record.updated_at);
         let tags_json = serde_json::to_string(&record.tags)?;
 
@@ -493,7 +631,7 @@ impl StorageBackend for SqliteStore {
     }
 
     async fn get_all_embeddings(&self) -> Result<Vec<(String, Vec<f32>)>> {
-        let conn = self.conn.lock().await;
+        let conn = self.get_read_conn().lock().await;
         let mut stmt =
             conn.prepare("SELECT id, embedding FROM memories WHERE embedding IS NOT NULL")?;
         let results = stmt
@@ -515,7 +653,7 @@ impl StorageBackend for SqliteStore {
         if ids.is_empty() {
             return Ok(vec![]);
         }
-        let conn = self.conn.lock().await;
+        let conn = self.get_read_conn().lock().await;
         let placeholders: Vec<&str> = ids.iter().map(|_| "?").collect();
         let sql = format!(
             "SELECT * FROM memories WHERE id IN ({})",
@@ -532,9 +670,28 @@ impl StorageBackend for SqliteStore {
     }
 
     async fn count(&self) -> Result<u64> {
-        let conn = self.conn.lock().await;
+        let conn = self.get_read_conn().lock().await;
         let count: u64 = conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
         Ok(count)
+    }
+
+    async fn cleanup_expired(&self) -> Result<u64> {
+        let conn = self.write_conn.lock().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let now_secs = now.as_secs() as i64;
+
+        let rows = conn.execute(
+            "DELETE FROM memories WHERE expires_at_secs IS NOT NULL AND expires_at_secs > 0 AND expires_at_secs <= ?1",
+            params![now_secs],
+        )?;
+
+        if rows > 0 {
+            tracing::info!(count = rows, "Cleaned up expired memory records");
+        }
+
+        Ok(rows as u64)
     }
 }
 

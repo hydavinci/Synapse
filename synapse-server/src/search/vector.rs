@@ -2,7 +2,14 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
 
+use tokio::sync::RwLock;
+use tracing::info;
+
+use crate::search::hnsw::HnswIndex;
 use crate::storage::StorageBackend;
+
+/// Threshold above which we use the HNSW index instead of brute-force scan.
+const HNSW_THRESHOLD: usize = 10_000;
 
 /// A scored result for the min-heap (we want top-K max, so use min-heap and evict smallest).
 #[derive(PartialEq)]
@@ -32,23 +39,65 @@ impl Ord for ScoredItem {
 
 /// In-memory vector search using cosine similarity with top-K heap optimization.
 ///
-/// Performance characteristics:
-/// - O(n) scan, O(n log k) for top-k extraction via min-heap
-/// - Uses pre-computed query magnitude to avoid redundant sqrt
-/// - Suitable for < 100k records. Beyond that, integrate an HNSW index.
+/// When the corpus exceeds HNSW_THRESHOLD (10k records), an HNSW index is built
+/// and used for approximate nearest neighbor search. Below that threshold,
+/// brute-force cosine similarity scan is used.
 ///
-/// ## Upgrade path for >100k records:
-/// 1. Add `hnswlib-rs` or `usearch` crate dependency
-/// 2. Build HNSW graph from `get_all_embeddings()` on startup
-/// 3. Maintain incremental insertions via `add_point()`
-/// 4. Switch `search()` to use ANN query when corpus exceeds threshold
+/// Performance characteristics:
+/// - Brute-force: O(n) scan, O(n log k) for top-k extraction via min-heap
+/// - HNSW: O(log n) approximate search with high recall
 pub struct VectorSearch {
     store: Arc<dyn StorageBackend>,
+    hnsw: Arc<RwLock<Option<HnswIndex>>>,
 }
 
 impl VectorSearch {
     pub fn new(store: Arc<dyn StorageBackend>) -> Self {
-        Self { store }
+        Self {
+            store,
+            hnsw: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Initialize the HNSW index from stored embeddings if corpus is large enough.
+    /// Should be called on startup after storage is ready.
+    pub async fn init_index(&self) -> anyhow::Result<()> {
+        let all_embeddings = self.store.get_all_embeddings().await?;
+        if all_embeddings.len() >= HNSW_THRESHOLD {
+            info!(
+                count = all_embeddings.len(),
+                "Corpus exceeds {}; building HNSW index", HNSW_THRESHOLD
+            );
+            let index = HnswIndex::build_from(&all_embeddings)?;
+            let mut hnsw = self.hnsw.write().await;
+            *hnsw = Some(index);
+        } else {
+            info!(
+                count = all_embeddings.len(),
+                "Corpus below {} threshold; using brute-force search", HNSW_THRESHOLD
+            );
+        }
+        Ok(())
+    }
+
+    /// Notify the index of a new embedding insertion.
+    /// If HNSW is active, inserts into the index. If corpus just crossed the
+    /// threshold, builds the full index.
+    #[allow(dead_code)]
+    pub async fn notify_insert(&self, id: &str, embedding: &[f32]) -> anyhow::Result<()> {
+        let hnsw_guard = self.hnsw.read().await;
+        if let Some(ref index) = *hnsw_guard {
+            // HNSW active — incremental insert
+            index.insert(id, embedding).await?;
+        } else {
+            drop(hnsw_guard);
+            // Check if we should build the index now
+            let count = self.store.count().await.unwrap_or(0);
+            if count as usize >= HNSW_THRESHOLD {
+                self.init_index().await?;
+            }
+        }
+        Ok(())
     }
 
     /// Search for the top-k most similar records to the given query embedding.
@@ -76,13 +125,39 @@ impl VectorSearch {
             );
         }
 
+        // Try HNSW index first
+        let hnsw_guard = self.hnsw.read().await;
+        if let Some(ref index) = *hnsw_guard {
+            // Use HNSW approximate search
+            let results = index.search(query_embedding, top_k).await?;
+            // Filter by min_score
+            let filtered: Vec<(String, f32)> = results
+                .into_iter()
+                .filter(|(_, score)| *score >= min_score)
+                .collect();
+            return Ok(filtered);
+        }
+        drop(hnsw_guard);
+
+        // Fall back to brute-force scan
+        self.brute_force_search(query_embedding, top_k, min_score).await
+    }
+
+    /// Brute-force cosine similarity search using a min-heap for top-K.
+    async fn brute_force_search(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        min_score: f32,
+    ) -> anyhow::Result<Vec<(String, f32)>> {
+
         let all_embeddings = self.store.get_all_embeddings().await?;
 
         // Warn if corpus is very large (brute-force scan starts degrading)
         if all_embeddings.len() > 100_000 {
             tracing::warn!(
                 count = all_embeddings.len(),
-                "Vector search scanning >100k embeddings. Consider adding HNSW index."
+                "Vector search scanning >100k embeddings via brute-force. HNSW should be active."
             );
         }
 

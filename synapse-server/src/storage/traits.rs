@@ -25,7 +25,7 @@ pub trait StorageBackend: Send + Sync + 'static {
         before: Option<prost_types::Timestamp>,
     ) -> Result<u64>;
 
-    /// List records with optional filters.
+    /// List records with optional filters (offset-based pagination).
     async fn list(
         &self,
         scope: Option<&proto::Scope>,
@@ -34,6 +34,17 @@ pub trait StorageBackend: Send + Sync + 'static {
         limit: u32,
         offset: u32,
     ) -> Result<(Vec<proto::MemoryRecord>, u32)>;
+
+    /// List records with cursor-based pagination.
+    /// Returns (records, next_cursor). Cursor format: "created_at_secs:id"
+    async fn list_with_cursor(
+        &self,
+        scope: Option<&proto::Scope>,
+        kinds: &[i32],
+        tags: &[String],
+        limit: u32,
+        cursor: Option<&str>,
+    ) -> Result<(Vec<proto::MemoryRecord>, Option<String>)>;
 
     /// Get version history of a record.
     async fn history(&self, id: &str) -> Result<Vec<proto::MemoryRecord>>;
@@ -49,4 +60,8 @@ pub trait StorageBackend: Send + Sync + 'static {
 
     /// Get total record count.
     async fn count(&self) -> Result<u64>;
+
+    /// Delete expired records (where expires_at <= now).
+    /// Returns the number of records deleted.
+    async fn cleanup_expired(&self) -> Result<u64>;
 }
